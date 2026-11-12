@@ -1,8 +1,6 @@
 import { redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
-import { db } from '$lib/db/client';
-import { objectives, keyResults, savedQueries, objectiveReflections } from '$lib/db/schema';
-import { eq, and, isNull } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 
 export const load: PageServerLoad = async ({ locals, url, depends }) => {
 	// Register dependency for invalidation
@@ -18,28 +16,21 @@ export const load: PageServerLoad = async ({ locals, url, depends }) => {
 		? parseInt(url.searchParams.get('month') || String(new Date().getMonth() + 1))
 		: null;
 
+	const services = await getDatabase();
+
 	// Get objectives for the selected year and level (and month if monthly)
-	const userObjectives = await db.query.objectives.findMany({
-		where: level === 'monthly' && month
-			? and(
-				eq(objectives.userId, locals.user.id),
-				eq(objectives.year, year),
-				eq(objectives.level, level),
-				eq(objectives.month, month)
-			)
-			: and(
-				eq(objectives.userId, locals.user.id),
-				eq(objectives.year, year),
-				eq(objectives.level, level)
-			)
-	});
+	const allObjectives = await services.objectives.listByUser(locals.user.id);
+	const userObjectives = allObjectives.filter(
+		(o) =>
+			o.year === year &&
+			o.level === level &&
+			(level === 'monthly' && month ? o.month === month : true)
+	);
 
 	// Get key results for each objective
 	const objectivesWithKRs = await Promise.all(
 		userObjectives.map(async (obj) => {
-			const krs = await db.query.keyResults.findMany({
-				where: eq(keyResults.objectiveId, obj.id)
-			});
+			const krs = await services.keyResults.listByObjective(obj.id);
 
 			// Calculate weighted average score
 			const totalWeight = krs.reduce((sum, kr) => sum + kr.weight, 0);
@@ -62,19 +53,13 @@ export const load: PageServerLoad = async ({ locals, url, depends }) => {
 		: 0;
 
 	// Get all saved queries for the progress query selector
-	const allSavedQueries = await db.query.savedQueries.findMany({
-		where: eq(savedQueries.userId, locals.user.id)
-	});
+	const allSavedQueries = await services.savedQueries.listByUser(locals.user.id);
 
 	// Get distinct years that have objectives for this user
-	const yearsResult = await db
-		.selectDistinct({ year: objectives.year })
-		.from(objectives)
-		.where(eq(objectives.userId, locals.user.id))
-		.orderBy(objectives.year);
+	const yearsSet = new Set(allObjectives.map((o) => o.year));
+	let availableYears = [...yearsSet].sort((a, b) => a - b);
 
 	const currentYear = new Date().getFullYear();
-	let availableYears = yearsResult.map(r => r.year);
 
 	// If no years found, default to current year
 	if (availableYears.length === 0) {
@@ -86,15 +71,11 @@ export const load: PageServerLoad = async ({ locals, url, depends }) => {
 	}
 
 	// Get reflection for current year/level/month
-	const reflection = await db.query.objectiveReflections.findFirst({
-		where: and(
-			eq(objectiveReflections.userId, locals.user.id),
-			eq(objectiveReflections.level, level),
-			eq(objectiveReflections.year, year),
-			level === 'monthly' && month
-				? eq(objectiveReflections.month, month)
-				: isNull(objectiveReflections.month)
-		)
+	const reflection = await services.objectiveReflections.findByUserLevelYearMonth({
+		userId: locals.user.id,
+		level,
+		year,
+		month: level === 'monthly' && month ? month : null
 	});
 
 	return {

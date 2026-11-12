@@ -3,10 +3,8 @@
  * Assembles the full system prompt from default template, API reference, and user metrics.
  */
 
-import { db } from '$lib/db/client';
-import { userAiConfig, metricsTemplates } from '$lib/db/schema';
-import type { MetricDefinition } from '$lib/db/schema';
-import { eq, desc } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
+import type { MetricDefinition } from '$lib/db/models';
 import defaultPromptMd from './default-prompt.md?raw';
 import assistantPromptMd from './assistant-prompt.md?raw';
 import apiReferenceMd from '../../../../docs/QUERY_API_REFERENCE.md?raw';
@@ -76,9 +74,8 @@ The user is writing a JavaScript expression for a computed metric in their daily
  */
 export async function buildSystemPrompt(userId: string, context: AiChatContext = 'query', contextData?: Record<string, unknown>): Promise<string> {
 	// Get user's custom prompt or default
-	const config = await db.query.userAiConfig.findFirst({
-		where: eq(userAiConfig.userId, userId)
-	});
+	const services = await getDatabase();
+	const config = await services.userAiConfig.findByUser(userId);
 
 	// Assistant mode uses a separate template (tool-use), not the query coding prompt.
 	// The user's custom prompt only overrides the query-coding default.
@@ -147,10 +144,10 @@ export async function buildSystemPrompt(userId: string, context: AiChatContext =
  * Build a description of the user's available metrics from their active template.
  */
 async function buildMetricsInfo(userId: string): Promise<string> {
-	const template = await db.query.metricsTemplates.findFirst({
-		where: eq(metricsTemplates.userId, userId),
-		orderBy: [desc(metricsTemplates.effectiveFrom)]
-	});
+	const services = await getDatabase();
+	const templates = await services.metricsTemplates.listByUser(userId);
+	templates.sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
+	const template = templates[0];
 
 	if (!template) {
 		return '## User Metrics\n\nNo metrics template configured. The user may not have any daily metrics data.';

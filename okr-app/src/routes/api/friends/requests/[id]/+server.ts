@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { users, friendRequests, friendships } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
 
 // POST /api/friends/requests/[id] - Accept or decline a friend request
@@ -16,15 +14,14 @@ export const POST: RequestHandler = async ({ locals, request, params }) => {
 		const { action } = body;
 		const requestId = params.id;
 		const userId = locals.user.id;
+		const services = await getDatabase();
 
 		if (!action || !['accept', 'decline'].includes(action)) {
 			return json({ error: 'Invalid action. Must be "accept" or "decline"' }, { status: 400 });
 		}
 
 		// Find the request - must be sent TO this user and be pending
-		const friendRequest = await db.query.friendRequests.findFirst({
-			where: and(eq(friendRequests.id, requestId), eq(friendRequests.toUserId, userId), eq(friendRequests.status, 'pending'))
-		});
+		const friendRequest = await services.friendRequests.findPendingTo(requestId, userId);
 
 		if (!friendRequest) {
 			return json({ error: 'Friend request not found or already processed' }, { status: 404 });
@@ -34,19 +31,13 @@ export const POST: RequestHandler = async ({ locals, request, params }) => {
 
 		if (action === 'decline') {
 			// Update request status to declined
-			await db
-				.update(friendRequests)
-				.set({ status: 'declined', respondedAt: now })
-				.where(eq(friendRequests.id, requestId));
+			await services.friendRequests.update(requestId, { status: 'declined', respondedAt: now });
 
 			return json({ success: true, status: 'declined' });
 		}
 
 		// Accept: Update request and create friendship
-		await db
-			.update(friendRequests)
-			.set({ status: 'accepted', respondedAt: now })
-			.where(eq(friendRequests.id, requestId));
+		await services.friendRequests.update(requestId, { status: 'accepted', respondedAt: now });
 
 		// Create friendship (ensure userId1 < userId2 for consistency)
 		const [id1, id2] =
@@ -55,7 +46,7 @@ export const POST: RequestHandler = async ({ locals, request, params }) => {
 				: [userId, friendRequest.fromUserId];
 
 		const friendshipId = uuidv4();
-		await db.insert(friendships).values({
+		await services.friendships.create({
 			id: friendshipId,
 			userId1: id1,
 			userId2: id2,
@@ -63,10 +54,7 @@ export const POST: RequestHandler = async ({ locals, request, params }) => {
 		});
 
 		// Get friend info
-		const friend = await db.query.users.findFirst({
-			where: eq(users.id, friendRequest.fromUserId),
-			columns: { id: true, username: true }
-		});
+		const friend = await services.users.findById(friendRequest.fromUserId);
 
 		return json({
 			success: true,
@@ -92,18 +80,17 @@ export const DELETE: RequestHandler = async ({ locals, params }) => {
 	try {
 		const requestId = params.id;
 		const userId = locals.user.id;
+		const services = await getDatabase();
 
 		// Find the request - must be sent BY this user and be pending
-		const friendRequest = await db.query.friendRequests.findFirst({
-			where: and(eq(friendRequests.id, requestId), eq(friendRequests.fromUserId, userId), eq(friendRequests.status, 'pending'))
-		});
+		const friendRequest = await services.friendRequests.findPendingFrom(requestId, userId);
 
 		if (!friendRequest) {
 			return json({ error: 'Friend request not found or cannot be cancelled' }, { status: 404 });
 		}
 
 		// Delete the request
-		await db.delete(friendRequests).where(eq(friendRequests.id, requestId));
+		await services.friendRequests.remove(requestId);
 
 		return json({ success: true });
 	} catch (error) {

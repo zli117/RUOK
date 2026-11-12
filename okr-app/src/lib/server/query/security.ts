@@ -1,5 +1,4 @@
-import { db } from '$lib/db/client';
-import { queryExecutionLogs } from '$lib/db/schema';
+import { getDatabase } from '$lib/server/database';
 import { nanoid } from 'nanoid';
 
 // Rate limiting configuration
@@ -69,7 +68,8 @@ export async function logQueryExecution(
 	executionTimeMs?: number
 ): Promise<void> {
 	try {
-		await db.insert(queryExecutionLogs).values({
+		const db = await getDatabase();
+		await db.queryExecutionLogs.create({
 			id: nanoid(),
 			userId,
 			codeSnippet: codeSnippet.slice(0, 1000), // Limit stored code size
@@ -88,9 +88,6 @@ export async function logQueryExecution(
  * Get recent query executions for a user (for admin/debugging)
  */
 export async function getRecentExecutions(userId: string, limit = 50) {
-	return db.query.queryExecutionLogs.findMany({
-		where: (logs, { eq }) => eq(logs.userId, userId),
-		orderBy: (logs, { desc }) => [desc(logs.createdAt)],
-		limit
-	});
+	const db = await getDatabase();
+	return db.queryExecutionLogs.listByUser(userId, limit);
 }

@@ -1,6 +1,4 @@
-import { db } from '$lib/db/client';
-import { users, sessions } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import bcrypt from 'bcrypt';
 import { v4 as uuidv4 } from 'uuid';
 import type { Cookies } from '@sveltejs/kit';
@@ -37,9 +35,8 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
  * Create a new user
  */
 export async function createUser(username: string, password: string): Promise<AuthUser> {
-	const existingUser = await db.query.users.findFirst({
-		where: eq(users.username, username)
-	});
+	const db = await getDatabase();
+	const existingUser = await db.users.findByUsername(username);
 
 	if (existingUser) {
 		throw new Error('Username already exists');
@@ -48,7 +45,7 @@ export async function createUser(username: string, password: string): Promise<Au
 	const id = uuidv4();
 	const passwordHash = await hashPassword(password);
 
-	await db.insert(users).values({
+	await db.users.create({
 		id,
 		username,
 		passwordHash
@@ -64,9 +61,8 @@ export async function authenticateUser(
 	username: string,
 	password: string
 ): Promise<AuthUser | null> {
-	const user = await db.query.users.findFirst({
-		where: eq(users.username, username)
-	});
+	const db = await getDatabase();
+	const user = await db.users.findByUsername(username);
 
 	if (!user) {
 		return null;
@@ -86,7 +82,7 @@ export async function authenticateUser(
 	let isAdmin = user.isAdmin || false;
 	const adminUsername = env.ADMIN_USERNAME;
 	if (adminUsername && user.username === adminUsername && !user.isAdmin) {
-		await db.update(users).set({ isAdmin: true }).where(eq(users.id, user.id));
+		await db.users.update(user.id, { isAdmin: true });
 		isAdmin = true;
 	}
 
@@ -104,10 +100,11 @@ export async function authenticateUser(
  * Create a new session for a user
  */
 export async function createSession(userId: string): Promise<string> {
+	const db = await getDatabase();
 	const sessionId = uuidv4();
 	const expiresAt = new Date(Date.now() + SESSION_DURATION_DAYS * 24 * 60 * 60 * 1000);
 
-	await db.insert(sessions).values({
+	await db.sessions.create({
 		id: sessionId,
 		userId,
 		expiresAt
@@ -120,9 +117,8 @@ export async function createSession(userId: string): Promise<string> {
  * Get user from session ID
  */
 export async function getUserFromSession(sessionId: string): Promise<AuthUser | null> {
-	const session = await db.query.sessions.findFirst({
-		where: eq(sessions.id, sessionId)
-	});
+	const db = await getDatabase();
+	const session = await db.sessions.findById(sessionId);
 
 	if (!session) {
 		return null;
@@ -130,13 +126,11 @@ export async function getUserFromSession(sessionId: string): Promise<AuthUser | 
 
 	// Check if session is expired
 	if (session.expiresAt < new Date()) {
-		await deleteSession(sessionId);
+		await db.sessions.delete(sessionId);
 		return null;
 	}
 
-	const user = await db.query.users.findFirst({
-		where: eq(users.id, session.userId)
-	});
+	const user = await db.users.findById(session.userId);
 
 	if (!user) {
 		return null;
@@ -144,7 +138,7 @@ export async function getUserFromSession(sessionId: string): Promise<AuthUser | 
 
 	// Check if user is disabled
 	if (user.isDisabled) {
-		await deleteSession(sessionId);
+		await db.sessions.delete(sessionId);
 		return null;
 	}
 
@@ -162,7 +156,8 @@ export async function getUserFromSession(sessionId: string): Promise<AuthUser | 
  * Delete a session
  */
 export async function deleteSession(sessionId: string): Promise<void> {
-	await db.delete(sessions).where(eq(sessions.id, sessionId));
+	const db = await getDatabase();
+	await db.sessions.delete(sessionId);
 }
 
 /**
@@ -196,10 +191,6 @@ export function clearSessionCookie(cookies: Cookies): void {
  * Clean up expired sessions (call periodically)
  */
 export async function cleanupExpiredSessions(): Promise<number> {
-	const result = await db
-		.delete(sessions)
-		.where(eq(sessions.expiresAt, new Date(0))) // This needs proper implementation
-		.returning();
-
-	return result.length;
+	const db = await getDatabase();
+	return db.sessions.deleteExpired(new Date());
 }

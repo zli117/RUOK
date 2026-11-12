@@ -2,6 +2,11 @@
 
 Operations guide for deploying, maintaining, and backing up the RUOK.
 
+> Database configuration (both backends), migration operations, and safe
+> native backup/recovery are covered comprehensively in [DATABASES.md](DATABASES.md);
+> CNPG (PostgreSQL) deployment is covered in [CNPG-HANDOFF.md](CNPG-HANDOFF.md). This
+> page keeps the runnable maintenance commands and links to those guides.
+
 ## Table of Contents
 
 - [Deployment](#deployment)
@@ -421,13 +426,19 @@ The database is a single SQLite file at `./data/okr.db`.
 
 ### Manual Backup
 
-```bash
-# Stop writes (optional but safest)
-sqlite3 ./data/okr.db "PRAGMA wal_checkpoint(TRUNCATE);"
+Use SQLite's online backup so the copy is consistent even while the app is
+writing. Do **not** copy the live file with `cp` while writers are active.
 
-# Copy database
-cp ./data/okr.db ./backups/okr-$(date +%Y%m%d-%H%M%S).db
+```bash
+# Online, consistent copy (safe with active writers)
+mkdir -p ./backups
+sqlite3 ./data/okr.db ".backup './backups/okr-$(date +%Y%m%d-%H%M%S).db'"
 ```
+
+> See [DATABASES.md](DATABASES.md) → "Native installation backup (SQLite)" for
+> the distinction between this native installation backup and the portable
+> version-2 user export, and for the safe recipe to use when a bare file copy is
+> unavoidable (stop writers first).
 
 ### Automated Backup Script
 
@@ -443,12 +454,9 @@ RETENTION_DAYS=30
 
 mkdir -p "$BACKUP_DIR"
 
-# Checkpoint WAL to main database
-sqlite3 "$DB_PATH" "PRAGMA wal_checkpoint(TRUNCATE);"
-
-# Create backup with timestamp
+# Online, consistent backup via SQLite's backup API (safe with active writers)
 BACKUP_FILE="$BACKUP_DIR/okr-$(date +%Y%m%d-%H%M%S).db"
-cp "$DB_PATH" "$BACKUP_FILE"
+sqlite3 "$DB_PATH" ".backup '$BACKUP_FILE'"
 
 # Compress
 gzip "$BACKUP_FILE"
@@ -545,10 +553,9 @@ mountpoint -q /mnt/nextcloud || mount /mnt/nextcloud
 
 mkdir -p "$BACKUP_DIR"
 
-# Checkpoint and backup
-sqlite3 "$DB_PATH" "PRAGMA wal_checkpoint(TRUNCATE);"
+# Online, consistent backup (safe with active writers)
 BACKUP_FILE="$BACKUP_DIR/okr-$(date +%Y%m%d-%H%M%S).db"
-cp "$DB_PATH" "$BACKUP_FILE"
+sqlite3 "$DB_PATH" ".backup '$BACKUP_FILE'"
 gzip "$BACKUP_FILE"
 
 # Cleanup old backups
@@ -591,10 +598,9 @@ LOCAL_BACKUP="/opt/ruok/backups"
 
 mkdir -p "$LOCAL_BACKUP"
 
-# Backup locally first
-sqlite3 "$DB_PATH" "PRAGMA wal_checkpoint(TRUNCATE);"
+# Backup locally first (online, consistent with active writers)
 BACKUP_FILE="$LOCAL_BACKUP/okr-$(date +%Y%m%d-%H%M%S).db"
-cp "$DB_PATH" "$BACKUP_FILE"
+sqlite3 "$DB_PATH" ".backup '$BACKUP_FILE'"
 gzip "$BACKUP_FILE"
 
 # Sync to Nextcloud
@@ -645,8 +651,8 @@ sudo -u okr npm ci
 # Build
 sudo -u okr npm run build
 
-# Push database schema
-sudo -u okr npm run db:push
+# Migrate the database schema (versioned runner; db:push is not for production)
+sudo -u okr npm run db:migrate
 ```
 
 ### Performance Optimizations
@@ -797,8 +803,10 @@ sudo journalctl -u ruok -f
 # Check database integrity
 sqlite3 ./data/okr.db "PRAGMA integrity_check;"
 
-# Vacuum (reclaim space)
+# Vacuum (reclaim space) — stop writers first, as VACUUM rewrites the file
+sudo systemctl stop ruok
 sqlite3 ./data/okr.db "VACUUM;"
+sudo systemctl start ruok
 
 # Analyze (optimize queries)
 sqlite3 ./data/okr.db "ANALYZE;"

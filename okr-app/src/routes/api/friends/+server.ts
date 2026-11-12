@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { users, friendRequests, friendships, friendNotes } from '$lib/db/schema';
-import { eq, and, or, ne } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
 
 // GET /api/friends - List current friends
@@ -12,11 +10,10 @@ export const GET: RequestHandler = async ({ locals }) => {
 	}
 
 	const userId = locals.user.id;
+	const services = await getDatabase();
 
 	// Find all friendships where the user is either userId1 or userId2
-	const userFriendships = await db.query.friendships.findMany({
-		where: or(eq(friendships.userId1, userId), eq(friendships.userId2, userId))
-	});
+	const userFriendships = await services.friendships.listForUser(userId);
 
 	// Get friend IDs (the other user in each friendship)
 	const friendIds = userFriendships.map((f) => (f.userId1 === userId ? f.userId2 : f.userId1));
@@ -28,14 +25,9 @@ export const GET: RequestHandler = async ({ locals }) => {
 	// Get friend user info and notes
 	const friendsData = await Promise.all(
 		friendIds.map(async (friendId) => {
-			const friend = await db.query.users.findFirst({
-				where: eq(users.id, friendId),
-				columns: { id: true, username: true }
-			});
+			const friend = await services.users.findById(friendId);
 
-			const note = await db.query.friendNotes.findFirst({
-				where: and(eq(friendNotes.userId, userId), eq(friendNotes.friendId, friendId))
-			});
+			const note = await services.friendNotes.findByUserAndFriend(userId, friendId);
 
 			const friendship = userFriendships.find(
 				(f) => (f.userId1 === userId && f.userId2 === friendId) ||
@@ -73,12 +65,10 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 
 		const normalizedUsername = username.toLowerCase().trim();
 		const userId = locals.user.id;
+		const services = await getDatabase();
 
 		// Find target user by username
-		const targetUser = await db.query.users.findFirst({
-			where: eq(users.username, normalizedUsername),
-			columns: { id: true, username: true }
-		});
+		const targetUser = await services.users.findByUsername(normalizedUsername);
 
 		if (!targetUser) {
 			return json({ error: 'User not found' }, { status: 404 });
@@ -90,27 +80,14 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		}
 
 		// Check if already friends
-		const existingFriendship = await db.query.friendships.findFirst({
-			where: or(
-				and(eq(friendships.userId1, userId), eq(friendships.userId2, targetUser.id)),
-				and(eq(friendships.userId1, targetUser.id), eq(friendships.userId2, userId))
-			)
-		});
+		const existingFriendship = await services.friendships.findBetween(userId, targetUser.id);
 
 		if (existingFriendship) {
 			return json({ error: 'Already friends with this user' }, { status: 409 });
 		}
 
 		// Check if there's already a pending request (in either direction)
-		const existingRequest = await db.query.friendRequests.findFirst({
-			where: and(
-				or(
-					and(eq(friendRequests.fromUserId, userId), eq(friendRequests.toUserId, targetUser.id)),
-					and(eq(friendRequests.fromUserId, targetUser.id), eq(friendRequests.toUserId, userId))
-				),
-				eq(friendRequests.status, 'pending')
-			)
-		});
+		const existingRequest = await services.friendRequests.findPendingBetween(userId, targetUser.id);
 
 		if (existingRequest) {
 			// If the other user already sent us a request, tell the user to check their requests
@@ -122,7 +99,7 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 
 		// Create the friend request
 		const requestId = uuidv4();
-		await db.insert(friendRequests).values({
+		await services.friendRequests.create({
 			id: requestId,
 			fromUserId: userId,
 			toUserId: targetUser.id,

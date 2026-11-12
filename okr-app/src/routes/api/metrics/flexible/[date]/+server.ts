@@ -1,39 +1,17 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { metricsTemplates, dailyMetricValues } from '$lib/db/schema';
-import type { MetricDefinition } from '$lib/db/schema';
-import { eq, and, lte, desc } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
+import type { MetricDefinition } from '$lib/db/models';
 import { v4 as uuidv4 } from 'uuid';
 import { evaluateMetrics, type MetricValues } from '$lib/server/metrics/evaluator';
 import { fetchExternalMetrics, getExternalSourceIds } from '$lib/server/metrics/external';
 
 /**
- * Get the active template for a given date
- */
-async function getActiveTemplate(userId: string, date: string) {
-	// Find template where effectiveFrom <= date, ordered by effectiveFrom desc
-	const template = await db.query.metricsTemplates.findFirst({
-		where: and(
-			eq(metricsTemplates.userId, userId),
-			lte(metricsTemplates.effectiveFrom, date)
-		),
-		orderBy: [desc(metricsTemplates.effectiveFrom)]
-	});
-
-	return template;
-}
-
-/**
  * Get stored metric values for a date
  */
 async function getStoredValues(userId: string, date: string): Promise<MetricValues> {
-	const values = await db.query.dailyMetricValues.findMany({
-		where: and(
-			eq(dailyMetricValues.userId, userId),
-			eq(dailyMetricValues.date, date)
-		)
-	});
+	const services = await getDatabase();
+	const values = await services.dailyMetricValues.listByUserAndDate(userId, date);
 
 	const result: MetricValues = {};
 	for (const v of values) {
@@ -53,8 +31,10 @@ export const GET: RequestHandler = async ({ locals, params }) => {
 		return json({ error: 'Invalid date format. Use YYYY-MM-DD' }, { status: 400 });
 	}
 
-	// Get the active template
-	const template = await getActiveTemplate(locals.user.id, date);
+	const services = await getDatabase();
+
+	// Get the active template (version selected by effectiveFrom <= date)
+	const template = await services.metricsTemplates.findActiveByDate(locals.user.id, date);
 
 	if (!template) {
 		return json({
@@ -124,46 +104,32 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 			return json({ error: 'Values object required' }, { status: 400 });
 		}
 
+		const services = await getDatabase();
+
 		// Get the active template to validate metric names
-		const template = await getActiveTemplate(locals.user.id, date);
+		const template = await services.metricsTemplates.findActiveByDate(locals.user.id, date);
 		if (!template) {
 			return json({ error: 'No active template for this date' }, { status: 400 });
 		}
 
 		const metricsDefinition: MetricDefinition[] = JSON.parse(template.metricsDefinition);
 		const inputMetricNames = metricsDefinition
-			.filter(m => m.type === 'input')
-			.map(m => m.name);
+			.filter((m) => m.type === 'input')
+			.map((m) => m.name);
 
 		// Only save input-type metrics (not computed or external)
 		for (const [metricName, value] of Object.entries(values)) {
 			if (!inputMetricNames.includes(metricName)) continue;
 
-			// Check if value already exists
-			const existing = await db.query.dailyMetricValues.findFirst({
-				where: and(
-					eq(dailyMetricValues.userId, locals.user.id),
-					eq(dailyMetricValues.date, date),
-					eq(dailyMetricValues.metricName, metricName)
-				)
-			});
-
 			const stringValue = value === null ? null : String(value);
-
-			if (existing) {
-				await db.update(dailyMetricValues)
-					.set({ value: stringValue })
-					.where(eq(dailyMetricValues.id, existing.id));
-			} else {
-				await db.insert(dailyMetricValues).values({
-					id: uuidv4(),
-					userId: locals.user.id,
-					date,
-					metricName,
-					value: stringValue,
-					source: 'user'
-				});
-			}
+			await services.dailyMetricValues.upsert({
+				id: uuidv4(),
+				userId: locals.user.id,
+				date,
+				metricName,
+				value: stringValue,
+				source: 'user'
+			});
 		}
 
 		// Re-evaluate all metrics and return

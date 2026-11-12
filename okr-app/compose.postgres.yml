@@ -1,0 +1,55 @@
+# RUOK — PostgreSQL mode (WP09 / T034 / T035).
+#
+# Runs the SAME production image against an EXTERNAL PostgreSQL database.
+# Deliberately NO SQLite data volume is mounted: PostgreSQL keeps all data in
+# the external database, and the container does not depend on a SQLite
+# filesystem at all. The image's /app/data directory exists but is unused.
+#
+# The container runs as non-root (uid 1001). This file is STANDALONE (no
+# pre-existing network required) so it works for local dev/smoke too. To attach
+# to an existing external reverse-proxy network (e.g. named `proxy`), add it
+# with an override file (`networks: [default, proxy]` + `proxy: {external: true}`)
+# and apply it via `docker compose -f compose.postgres.yml -f <override>.yml up -d`.
+#
+# Configuration (all via environment, no secrets baked into the image):
+#   - DATABASE_URL              required; e.g. postgresql://user:pass@host:5432/db
+#   - DATABASE_SSL_MODE         `disable` (default) or `verify-full`
+#   - DATABASE_SSL_CA_FILE      container path to the CA file (verified TLS only)
+#   - DATABASE_POOL_MAX / connect / statement timeouts (bounded, optional)
+#
+# Verified TLS (T036): place the CA certificate in ./secrets/ca.pem (mounted
+# read-only at /run/secrets/), then set in .env:
+#     DATABASE_SSL_MODE=verify-full
+#     DATABASE_SSL_CA_FILE=/run/secrets/ca.pem
+# The app NEVER disables verification silently (see config.ts).
+
+services:
+  ruok:
+    build: .
+    image: ruok:local
+    container_name: ruok-postgres
+    restart: unless-stopped
+    # Non-root user; no SQLite volume is mounted.
+    user: "1001:1001"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_TYPE=postgres
+      - DATABASE_URL=${DATABASE_URL:?set DATABASE_URL in your .env file}
+      - DATABASE_SSL_MODE=${DATABASE_SSL_MODE:-disable}
+      - DATABASE_SSL_CA_FILE=${DATABASE_SSL_CA_FILE:-}
+      - DATABASE_POOL_MAX=${DATABASE_POOL_MAX:-5}
+      - DATABASE_CONNECT_TIMEOUT_MS=${DATABASE_CONNECT_TIMEOUT_MS:-10000}
+      - DATABASE_STATEMENT_TIMEOUT_MS=${DATABASE_STATEMENT_TIMEOUT_MS:-30000}
+      - PORT=${PORT:-3000}
+      - HOST=0.0.0.0
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-}
+    volumes:
+      # CA certificates live on the host (./secrets/) and are mounted read-only.
+      - ./secrets:/run/secrets:ro
+    ports:
+      - "${PORT:-3000}:3000"
+    networks:
+      - default
+
+# ./secrets/ is auto-created if missing and may be empty when TLS
+    # verification is not used. Place a CA file there only for verified TLS.

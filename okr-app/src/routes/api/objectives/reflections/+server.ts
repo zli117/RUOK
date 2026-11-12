@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { objectiveReflections } from '$lib/db/schema';
-import { eq, and, isNull } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
 import { broadcastDataChange } from '$lib/server/events';
 
@@ -20,15 +18,12 @@ export const GET: RequestHandler = async ({ locals, url }) => {
 		return json({ error: 'Missing required parameters' }, { status: 400 });
 	}
 
-	const reflection = await db.query.objectiveReflections.findFirst({
-		where: and(
-			eq(objectiveReflections.userId, locals.user.id),
-			eq(objectiveReflections.level, level),
-			eq(objectiveReflections.year, year),
-			level === 'monthly' && month !== null
-				? eq(objectiveReflections.month, month)
-				: isNull(objectiveReflections.month)
-		)
+	const db = await getDatabase();
+	const reflection = await db.objectiveReflections.findByUserLevelYearMonth({
+		userId: locals.user.id,
+		level,
+		year,
+		month: level === 'monthly' ? month : null
 	});
 
 	return json({ reflection: reflection?.reflection || '' });
@@ -51,34 +46,30 @@ export const PUT: RequestHandler = async ({ locals, request }) => {
 			return json({ error: 'Month is required for monthly reflections' }, { status: 400 });
 		}
 
+		const db = await getDatabase();
+		const normalizedMonth = level === 'monthly' ? month : null;
+
 		// Check if reflection already exists
-		const existing = await db.query.objectiveReflections.findFirst({
-			where: and(
-				eq(objectiveReflections.userId, locals.user.id),
-				eq(objectiveReflections.level, level),
-				eq(objectiveReflections.year, year),
-				level === 'monthly' && month
-					? eq(objectiveReflections.month, month)
-					: isNull(objectiveReflections.month)
-			)
+		const existing = await db.objectiveReflections.findByUserLevelYearMonth({
+			userId: locals.user.id,
+			level,
+			year,
+			month: normalizedMonth
 		});
 
 		const now = new Date();
 
 		if (existing) {
 			// Update existing
-			await db
-				.update(objectiveReflections)
-				.set({ reflection, updatedAt: now })
-				.where(eq(objectiveReflections.id, existing.id));
+			await db.objectiveReflections.update(existing.id, { reflection, updatedAt: now });
 		} else {
 			// Create new
-			await db.insert(objectiveReflections).values({
+			await db.objectiveReflections.create({
 				id: uuidv4(),
 				userId: locals.user.id,
 				level,
 				year,
-				month: level === 'monthly' ? month : null,
+				month: normalizedMonth,
 				reflection,
 				createdAt: now,
 				updatedAt: now

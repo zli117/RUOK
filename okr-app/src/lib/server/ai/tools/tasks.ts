@@ -1,6 +1,4 @@
-import { db } from '$lib/db/client';
-import { tasks, taskAttributes, timePeriods } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
 import { broadcastDataChange } from '$lib/server/events';
 import { findOrCreateDailyPeriod, findOrCreateWeeklyPeriod, weekFromDate } from './periods';
@@ -34,36 +32,28 @@ export const listTasks: ToolDef<ListTasksArgs> = {
 		args.scope === 'day' ? `List tasks for ${args.day}` : `List tasks for ${args.year}-W${args.week}`,
 	async execute(ctx, args) {
 		let periodType: 'daily' | 'weekly';
-		const where = [eq(timePeriods.userId, ctx.userId)];
+		const services = await getDatabase();
+		let period;
 		if (args.scope === 'day') {
 			if (!args.day) throw new Error('day is required for scope=day');
 			periodType = 'daily';
-			where.push(eq(timePeriods.periodType, 'daily'));
-			where.push(eq(timePeriods.day, args.day));
+			period = await services.timePeriods.find({ userId: ctx.userId, type: 'daily', day: args.day });
 		} else {
 			if (!args.year || !args.week) throw new Error('year and week required for scope=week');
 			periodType = 'weekly';
-			where.push(eq(timePeriods.periodType, 'weekly'));
-			where.push(eq(timePeriods.year, args.year));
-			where.push(eq(timePeriods.week, args.week));
+			period = await services.timePeriods.find({ userId: ctx.userId, type: 'weekly', year: args.year, week: args.week });
 		}
-		const period = await db.query.timePeriods.findFirst({ where: and(...where) });
 		if (!period) return { tasks: [] };
 
-		const list = await db.query.tasks.findMany({
-			where: (t, { eq, and }) => {
-				const c = [eq(t.userId, ctx.userId), eq(t.timePeriodId, period.id)];
-				if (!args.includeCompleted) c.push(eq(t.completed, false));
-				return and(...c);
-			},
-			orderBy: (t, { asc }) => [asc(t.sortOrder)]
-		});
+		let list = await services.tasks.listByPeriod(period.id);
+		if (!args.includeCompleted) {
+			list = list.filter((t) => !t.completed);
+		}
+		list.sort((a, b) => a.sortOrder - b.sortOrder);
 
 		const result = await Promise.all(
 			list.map(async (t) => {
-				const attrs = await db.query.taskAttributes.findMany({
-					where: eq(taskAttributes.taskId, t.id)
-				});
+				const attrs = await services.taskAttributes.listByTask(t.id);
 				return {
 					id: t.id,
 					title: t.title,
@@ -125,30 +115,29 @@ export const createTask: ToolDef<CreateTaskArgs, { taskId: string }> = {
 			periodId = await findOrCreateWeeklyPeriod(ctx.userId, year, week);
 		}
 
-		const existing = await db.query.tasks.findMany({ where: eq(tasks.timePeriodId, periodId) });
+		const services = await getDatabase();
+		const existing = await services.tasks.listByPeriod(periodId);
 		const maxSortOrder = existing.reduce((m, t) => Math.max(m, t.sortOrder), -1);
 
 		const taskId = uuidv4();
 		const now = new Date();
-		await db.insert(tasks).values({
-			id: taskId,
-			userId: ctx.userId,
-			timePeriodId: periodId,
-			title: args.title,
-			sortOrder: maxSortOrder + 1,
-			createdAt: now,
-			updatedAt: now
-		});
+		const attributes =
+			args.expectedHours !== undefined
+				? { expected_hours: args.expectedHours }
+				: undefined;
 
-		if (args.expectedHours !== undefined) {
-			await db.insert(taskAttributes).values({
-				id: uuidv4(),
-				taskId,
-				key: 'expected_hours',
-				value: String(args.expectedHours),
-				valueType: 'number'
-			});
-		}
+		await services.createTaskWithDetails({
+			task: {
+				id: taskId,
+				userId: ctx.userId,
+				timePeriodId: periodId,
+				title: args.title,
+				sortOrder: maxSortOrder + 1,
+				createdAt: now,
+				updatedAt: now
+			},
+			attributes
+		});
 
 		broadcastDataChange(ctx.userId, 'data:tasks', 'data:weekly');
 		return { taskId };
@@ -184,39 +173,32 @@ export const updateTask: ToolDef<UpdateTaskArgs> = {
 		return `Update task ${a.taskId.slice(0, 8)}: ${parts.join(', ') || '(no changes)'}`;
 	},
 	async execute(ctx, args) {
-		const existing = await db.query.tasks.findFirst({
-			where: and(eq(tasks.id, args.taskId), eq(tasks.userId, ctx.userId))
-		});
-		if (!existing) throw new Error('Task not found');
+		const services = await getDatabase();
+		const existing = await services.tasks.findById(args.taskId);
+		if (!existing || existing.userId !== ctx.userId) throw new Error('Task not found');
 
-		const updates: Record<string, unknown> = { updatedAt: new Date() };
+		const updates: {
+			title?: string;
+			completed?: boolean;
+			completedAt?: Date | null;
+			updatedAt?: Date;
+		} = { updatedAt: new Date() };
 		if (args.title !== undefined) updates.title = args.title;
 		if (args.completed !== undefined) {
 			updates.completed = args.completed;
 			updates.completedAt = args.completed ? new Date() : null;
 		}
 		if (Object.keys(updates).length > 1) {
-			await db.update(tasks).set(updates).where(eq(tasks.id, args.taskId));
+			await services.tasks.update(args.taskId, updates);
 		}
 
 		if (args.expectedHours !== undefined) {
-			const existingAttr = await db.query.taskAttributes.findFirst({
-				where: and(eq(taskAttributes.taskId, args.taskId), eq(taskAttributes.key, 'expected_hours'))
+			await services.taskAttributes.upsertByTaskAndKey({
+				taskId: args.taskId,
+				key: 'expected_hours',
+				value: String(args.expectedHours),
+				valueType: 'number'
 			});
-			if (existingAttr) {
-				await db
-					.update(taskAttributes)
-					.set({ value: String(args.expectedHours), valueType: 'number' })
-					.where(eq(taskAttributes.id, existingAttr.id));
-			} else {
-				await db.insert(taskAttributes).values({
-					id: uuidv4(),
-					taskId: args.taskId,
-					key: 'expected_hours',
-					value: String(args.expectedHours),
-					valueType: 'number'
-				});
-			}
 		}
 
 		broadcastDataChange(ctx.userId, 'data:tasks', 'data:weekly');
@@ -246,33 +228,20 @@ export const setTaskAttribute: ToolDef<SetTaskAttributeArgs> = {
 	},
 	preview: (a) => `Set ${a.key}=${a.value === null ? '∅' : a.value} on task ${a.taskId.slice(0, 8)}`,
 	async execute(ctx, args) {
-		const task = await db.query.tasks.findFirst({
-			where: and(eq(tasks.id, args.taskId), eq(tasks.userId, ctx.userId))
-		});
-		if (!task) throw new Error('Task not found');
-
-		const existing = await db.query.taskAttributes.findFirst({
-			where: and(eq(taskAttributes.taskId, args.taskId), eq(taskAttributes.key, args.key))
-		});
+		const services = await getDatabase();
+		const task = await services.tasks.findById(args.taskId);
+		if (!task || task.userId !== ctx.userId) throw new Error('Task not found');
 
 		if (args.value === null) {
-			if (existing) await db.delete(taskAttributes).where(eq(taskAttributes.id, existing.id));
+			await services.taskAttributes.removeByTaskAndKey(args.taskId, args.key);
 		} else {
 			const valueType = typeof args.value === 'number' ? 'number' : 'text';
-			if (existing) {
-				await db
-					.update(taskAttributes)
-					.set({ value: String(args.value), valueType })
-					.where(eq(taskAttributes.id, existing.id));
-			} else {
-				await db.insert(taskAttributes).values({
-					id: uuidv4(),
-					taskId: args.taskId,
-					key: args.key,
-					value: String(args.value),
-					valueType
-				});
-			}
+			await services.taskAttributes.upsertByTaskAndKey({
+				taskId: args.taskId,
+				key: args.key,
+				value: String(args.value),
+				valueType
+			});
 		}
 		broadcastDataChange(ctx.userId, 'data:tasks', 'data:weekly');
 		return { ok: true };
@@ -298,28 +267,16 @@ export const controlTaskTimer: ToolDef<TaskTimerArgs> = {
 	},
 	preview: (a) => `${a.action === 'start' ? 'Start' : 'Stop'} timer on task ${a.taskId.slice(0, 8)}`,
 	async execute(ctx, args) {
-		const task = await db.query.tasks.findFirst({
-			where: and(eq(tasks.id, args.taskId), eq(tasks.userId, ctx.userId))
-		});
-		if (!task) throw new Error('Task not found');
+		const services = await getDatabase();
+		const task = await services.tasks.findById(args.taskId);
+		if (!task || task.userId !== ctx.userId) throw new Error('Task not found');
 		const now = new Date();
 		if (args.action === 'start') {
 			if (task.timerStartedAt) throw new Error('Timer already running');
-			await db
-				.update(tasks)
-				.set({ timerStartedAt: now, updatedAt: now })
-				.where(eq(tasks.id, args.taskId));
+			await services.tasks.startTimer(args.taskId, now);
 		} else {
 			if (!task.timerStartedAt) throw new Error('Timer is not running');
-			const elapsed = now.getTime() - task.timerStartedAt.getTime();
-			await db
-				.update(tasks)
-				.set({
-					timerStartedAt: null,
-					timeSpentMs: (task.timeSpentMs || 0) + elapsed,
-					updatedAt: now
-				})
-				.where(eq(tasks.id, args.taskId));
+			await services.tasks.stopTimer(args.taskId, now);
 		}
 		broadcastDataChange(ctx.userId, 'data:tasks', 'data:weekly');
 		return { ok: true };
@@ -341,11 +298,10 @@ export const deleteTask: ToolDef<DeleteTaskArgs> = {
 	},
 	preview: (a) => `Delete task ${a.taskId.slice(0, 8)}`,
 	async execute(ctx, args) {
-		const existing = await db.query.tasks.findFirst({
-			where: and(eq(tasks.id, args.taskId), eq(tasks.userId, ctx.userId))
-		});
-		if (!existing) throw new Error('Task not found');
-		await db.delete(tasks).where(eq(tasks.id, args.taskId));
+		const services = await getDatabase();
+		const existing = await services.tasks.findById(args.taskId);
+		if (!existing || existing.userId !== ctx.userId) throw new Error('Task not found');
+		await services.tasks.remove(args.taskId);
 		broadcastDataChange(ctx.userId, 'data:tasks', 'data:weekly');
 		return { ok: true };
 	}

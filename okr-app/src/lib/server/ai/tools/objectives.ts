@@ -1,7 +1,5 @@
-import { db } from '$lib/db/client';
-import { objectives, keyResults } from '$lib/db/schema';
-import type { CheckboxItem } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
+import type { CheckboxItem } from '$lib/db/models';
 import { v4 as uuidv4 } from 'uuid';
 import { broadcastDataChange } from '$lib/server/events';
 import type { ToolDef } from './types';
@@ -31,22 +29,17 @@ export const listObjectives: ToolDef<ListObjectivesArgs> = {
 		return `List objectives for ${where}`;
 	},
 	async execute(ctx, args) {
-		const objs = await db.query.objectives.findMany({
-			where: (o, { eq, and }) => {
-				const c = [eq(o.userId, ctx.userId), eq(o.year, args.year)];
-				if (args.level) c.push(eq(o.level, args.level));
-				if (args.month) c.push(eq(o.month, args.month));
-				return and(...c);
-			},
-			orderBy: (o, { asc }) => [asc(o.year), asc(o.month)]
-		});
+		const services = await getDatabase();
+		let objs = await services.objectives.listByUser(ctx.userId);
+		objs = objs.filter((o) => o.year === args.year);
+		if (args.level) objs = objs.filter((o) => o.level === args.level);
+		if (args.month) objs = objs.filter((o) => o.month === args.month);
+		objs.sort((a, b) => a.year - b.year || (a.month ?? 0) - (b.month ?? 0));
 
 		const result = await Promise.all(
 			objs.map(async (o) => {
-				const krs = await db.query.keyResults.findMany({
-					where: eq(keyResults.objectiveId, o.id),
-					orderBy: (k, { asc }) => [asc(k.sortOrder)]
-				});
+				const krs = await services.keyResults.listByObjective(o.id);
+				krs.sort((a, b) => a.sortOrder - b.sortOrder);
 				return {
 					id: o.id,
 					title: o.title,
@@ -95,14 +88,11 @@ export const getObjective: ToolDef<GetObjectiveArgs> = {
 	},
 	preview: (a) => `Get objective ${a.objectiveId.slice(0, 8)}`,
 	async execute(ctx, args) {
-		const obj = await db.query.objectives.findFirst({
-			where: and(eq(objectives.id, args.objectiveId), eq(objectives.userId, ctx.userId))
-		});
-		if (!obj) throw new Error('Objective not found');
-		const krs = await db.query.keyResults.findMany({
-			where: eq(keyResults.objectiveId, obj.id),
-			orderBy: (k, { asc }) => [asc(k.sortOrder)]
-		});
+		const services = await getDatabase();
+		const obj = await services.objectives.findById(args.objectiveId);
+		if (!obj || obj.userId !== ctx.userId) throw new Error('Objective not found');
+		const krs = await services.keyResults.listByObjective(obj.id);
+		krs.sort((a, b) => a.sortOrder - b.sortOrder);
 		return {
 			objective: {
 				...obj,
@@ -155,7 +145,8 @@ export const createObjective: ToolDef<CreateObjectiveArgs, { objectiveId: string
 		}
 		const id = uuidv4();
 		const now = new Date();
-		await db.insert(objectives).values({
+		const services = await getDatabase();
+		await services.objectives.create({
 			id,
 			userId: ctx.userId,
 			title: args.title,
@@ -210,19 +201,25 @@ export const updateObjective: ToolDef<UpdateObjectiveArgs> = {
 		return `Update objective ${a.objectiveId.slice(0, 8)}: ${parts.join(', ') || '(no changes)'}`;
 	},
 	async execute(ctx, args) {
-		const existing = await db.query.objectives.findFirst({
-			where: and(eq(objectives.id, args.objectiveId), eq(objectives.userId, ctx.userId))
-		});
-		if (!existing) throw new Error('Objective not found');
+		const services = await getDatabase();
+		const existing = await services.objectives.findById(args.objectiveId);
+		if (!existing || existing.userId !== ctx.userId) throw new Error('Objective not found');
 
-		const updates: Record<string, unknown> = { updatedAt: new Date() };
+		const updates: {
+			title?: string;
+			description?: string | null;
+			weight?: number;
+			category?: string | null;
+			colorIndex?: number | null;
+			updatedAt?: Date;
+		} = { updatedAt: new Date() };
 		if (args.title !== undefined) updates.title = args.title;
 		if (args.description !== undefined) updates.description = args.description;
 		if (args.weight !== undefined) updates.weight = args.weight;
 		if (args.category !== undefined) updates.category = args.category;
 		if (args.colorIndex !== undefined) updates.colorIndex = args.colorIndex;
 
-		await db.update(objectives).set(updates).where(eq(objectives.id, args.objectiveId));
+		await services.objectives.update(args.objectiveId, updates);
 		broadcastDataChange(ctx.userId, 'data:objectives');
 		return { ok: true };
 	}
@@ -244,11 +241,10 @@ export const deleteObjective: ToolDef<DeleteObjectiveArgs> = {
 	},
 	preview: (a) => `Delete objective ${a.objectiveId.slice(0, 8)} (cascades KRs)`,
 	async execute(ctx, args) {
-		const existing = await db.query.objectives.findFirst({
-			where: and(eq(objectives.id, args.objectiveId), eq(objectives.userId, ctx.userId))
-		});
-		if (!existing) throw new Error('Objective not found');
-		await db.delete(objectives).where(eq(objectives.id, args.objectiveId));
+		const services = await getDatabase();
+		const existing = await services.objectives.findById(args.objectiveId);
+		if (!existing || existing.userId !== ctx.userId) throw new Error('Objective not found');
+		await services.objectives.remove(args.objectiveId);
 		broadcastDataChange(ctx.userId, 'data:objectives');
 		return { ok: true };
 	}
@@ -304,10 +300,9 @@ export const createKeyResult: ToolDef<CreateKeyResultArgs, { keyResultId: string
 		return `Add KR (${m}) to ${a.objectiveId.slice(0, 8)}: "${a.title}"`;
 	},
 	async execute(ctx, args) {
-		const obj = await db.query.objectives.findFirst({
-			where: and(eq(objectives.id, args.objectiveId), eq(objectives.userId, ctx.userId))
-		});
-		if (!obj) throw new Error('Objective not found');
+		const services = await getDatabase();
+		const obj = await services.objectives.findById(args.objectiveId);
+		if (!obj || obj.userId !== ctx.userId) throw new Error('Objective not found');
 
 		const measurementType: MeasurementType = args.measurementType ?? 'slider';
 		if (measurementType === 'checkboxes' && (!args.checkboxItems || args.checkboxItems.length === 0)) {
@@ -317,9 +312,7 @@ export const createKeyResult: ToolDef<CreateKeyResultArgs, { keyResultId: string
 			throw new Error('Either progressQueryCode or progressQueryId is required for custom_query');
 		}
 
-		const existing = await db.query.keyResults.findMany({
-			where: eq(keyResults.objectiveId, args.objectiveId)
-		});
+		const existing = await services.keyResults.listByObjective(args.objectiveId);
 		const maxSort = existing.reduce((m, k) => Math.max(m, k.sortOrder), -1);
 
 		const id = uuidv4();
@@ -332,7 +325,7 @@ export const createKeyResult: ToolDef<CreateKeyResultArgs, { keyResultId: string
 				}))
 			: null;
 
-		await db.insert(keyResults).values({
+		await services.keyResults.create({
 			id,
 			objectiveId: args.objectiveId,
 			title: args.title,
@@ -416,14 +409,26 @@ export const updateKeyResult: ToolDef<UpdateKeyResultArgs> = {
 		return `Update KR ${a.keyResultId.slice(0, 8)}: ${parts.join(', ') || '(no changes)'}`;
 	},
 	async execute(ctx, args) {
-		const kr = await db.query.keyResults.findFirst({ where: eq(keyResults.id, args.keyResultId) });
+		const services = await getDatabase();
+		const kr = await services.keyResults.findById(args.keyResultId);
 		if (!kr) throw new Error('Key result not found');
-		const obj = await db.query.objectives.findFirst({
-			where: and(eq(objectives.id, kr.objectiveId), eq(objectives.userId, ctx.userId))
-		});
-		if (!obj) throw new Error('Key result not found');
+		const obj = await services.objectives.findById(kr.objectiveId);
+		if (!obj || obj.userId !== ctx.userId) throw new Error('Key result not found');
 
-		const updates: Record<string, unknown> = { updatedAt: new Date() };
+		const updates: {
+			title?: string;
+			score?: number;
+			weight?: number;
+			expectedHours?: number;
+			details?: string | null;
+			measurementType?: MeasurementType;
+			checkboxItems?: string;
+			progressQueryCode?: string | null;
+			progressQueryId?: string | null;
+			widgetQueryCode?: string | null;
+			widgetQueryId?: string | null;
+			updatedAt?: Date;
+		} = { updatedAt: new Date() };
 		if (args.title !== undefined) updates.title = args.title;
 		if (args.score !== undefined) updates.score = Math.max(0, Math.min(1, args.score));
 		if (args.weight !== undefined) updates.weight = args.weight;
@@ -443,7 +448,7 @@ export const updateKeyResult: ToolDef<UpdateKeyResultArgs> = {
 		if (args.widgetQueryCode !== undefined) updates.widgetQueryCode = args.widgetQueryCode;
 		if (args.widgetQueryId !== undefined) updates.widgetQueryId = args.widgetQueryId;
 
-		await db.update(keyResults).set(updates).where(eq(keyResults.id, args.keyResultId));
+		await services.keyResults.update(args.keyResultId, updates);
 		broadcastDataChange(ctx.userId, 'data:objectives');
 		return { ok: true };
 	}
@@ -471,12 +476,11 @@ export const toggleKeyResultCheckbox: ToolDef<ToggleCheckboxArgs> = {
 	},
 	preview: (a) => `${a.completed ? 'Check' : 'Uncheck'} ${a.checkboxId.slice(0, 8)} on KR ${a.keyResultId.slice(0, 8)}`,
 	async execute(ctx, args) {
-		const kr = await db.query.keyResults.findFirst({ where: eq(keyResults.id, args.keyResultId) });
+		const services = await getDatabase();
+		const kr = await services.keyResults.findById(args.keyResultId);
 		if (!kr) throw new Error('Key result not found');
-		const obj = await db.query.objectives.findFirst({
-			where: and(eq(objectives.id, kr.objectiveId), eq(objectives.userId, ctx.userId))
-		});
-		if (!obj) throw new Error('Key result not found');
+		const obj = await services.objectives.findById(kr.objectiveId);
+		if (!obj || obj.userId !== ctx.userId) throw new Error('Key result not found');
 		if (!kr.checkboxItems) throw new Error('This KR has no checkbox items');
 
 		const items: CheckboxItem[] = JSON.parse(kr.checkboxItems);
@@ -484,10 +488,10 @@ export const toggleKeyResultCheckbox: ToolDef<ToggleCheckboxArgs> = {
 		if (!target) throw new Error('Checkbox item not found');
 		target.completed = args.completed;
 
-		await db
-			.update(keyResults)
-			.set({ checkboxItems: JSON.stringify(items), updatedAt: new Date() })
-			.where(eq(keyResults.id, args.keyResultId));
+		await services.keyResults.update(args.keyResultId, {
+			checkboxItems: JSON.stringify(items),
+			updatedAt: new Date()
+		});
 		broadcastDataChange(ctx.userId, 'data:objectives');
 		return { ok: true };
 	}
@@ -508,13 +512,12 @@ export const deleteKeyResult: ToolDef<DeleteKeyResultArgs> = {
 	},
 	preview: (a) => `Delete KR ${a.keyResultId.slice(0, 8)}`,
 	async execute(ctx, args) {
-		const kr = await db.query.keyResults.findFirst({ where: eq(keyResults.id, args.keyResultId) });
+		const services = await getDatabase();
+		const kr = await services.keyResults.findById(args.keyResultId);
 		if (!kr) throw new Error('Key result not found');
-		const obj = await db.query.objectives.findFirst({
-			where: and(eq(objectives.id, kr.objectiveId), eq(objectives.userId, ctx.userId))
-		});
-		if (!obj) throw new Error('Key result not found');
-		await db.delete(keyResults).where(eq(keyResults.id, args.keyResultId));
+		const obj = await services.objectives.findById(kr.objectiveId);
+		if (!obj || obj.userId !== ctx.userId) throw new Error('Key result not found');
+		await services.keyResults.remove(args.keyResultId);
 		broadcastDataChange(ctx.userId, 'data:objectives');
 		return { ok: true };
 	}

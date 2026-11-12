@@ -1,9 +1,7 @@
 import { getQuickJS, type QuickJSContext, type QuickJSHandle } from 'quickjs-emscripten';
 import type { QueryAPI, QueryFilters, DailyRecord, WeeklyRecord, TaskRecord, ObjectiveRecord } from './types';
-import { db } from '$lib/db/client';
-import { users, timePeriods, tasks, taskAttributes, dailyMetricValues, metricsTemplates, objectives, keyResults, tags, taskTags } from '$lib/db/schema';
-import type { MetricDefinition } from '$lib/db/schema';
-import { eq, and, gte, lte, desc } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
+import type { MetricDefinition } from '$lib/db/models';
 import { evaluateMetrics, type MetricValues } from '$lib/server/metrics/evaluator';
 import { getTodayInTimezone, getWeekNumber, getWeekYear, getTodayDateInTimezone, getWeekStartDate, getMonthForWeek, getWeeksInMonth, maxWeeksInYear, addDays, formatDate } from '$lib/utils/week';
 import type { WeekStartDay } from '$lib/utils/week';
@@ -230,10 +228,8 @@ function extractErrorMessage(error: unknown): string {
  */
 async function injectQueryAPI(context: QuickJSContext, userId: string) {
 	// Look up user settings for timezone and week start day
-	const user = await db.query.users.findFirst({
-		where: eq(users.id, userId),
-		columns: { timezone: true, weekStartDay: true }
-	});
+	const services = await getDatabase();
+	const user = await services.users.findById(userId);
 	const timezone = user?.timezone || 'UTC';
 	const weekStartDay = (user?.weekStartDay || 'monday') as WeekStartDay;
 
@@ -713,12 +709,8 @@ async function resolveMetricsForDate(
 	templates: { effectiveFrom: string; metricsDefinition: string }[]
 ): Promise<Record<string, string | number | null>> {
 	// Get raw stored values from DB
-	const metricRows = await db.query.dailyMetricValues.findMany({
-		where: and(
-			eq(dailyMetricValues.userId, userId),
-			eq(dailyMetricValues.date, date)
-		)
-	});
+	const services = await getDatabase();
+	const metricRows = await services.dailyMetricValues.listByUserAndDate(userId, date);
 
 	const rawValues: MetricValues = {};
 	for (const row of metricRows) {
@@ -733,6 +725,8 @@ async function resolveMetricsForDate(
 		for (const [key, val] of Object.entries(rawValues)) {
 			if (val === null || val === undefined) {
 				metrics[key] = null;
+			} else if (typeof val === 'boolean') {
+				metrics[key] = val ? 1 : 0;
 			} else {
 				const num = Number(val);
 				metrics[key] = isNaN(num) ? val : num;
@@ -775,72 +769,62 @@ async function resolveMetricsForDate(
 }
 
 async function fetchDaily(userId: string, filters: QueryFilters, weekStartDay: WeekStartDay): Promise<DailyRecord[]> {
-	const conditions = [
-		eq(timePeriods.userId, userId),
-		eq(timePeriods.periodType, 'daily')
-	];
+	const services = await getDatabase();
+	let periods = await services.timePeriods.listByUser(userId, { type: 'daily' });
 
+	// Apply date-range / year / month / week filters in memory. This mirrors the
+	// legacy SQL `day` range filtering exactly (the day field is a YYYY-MM-DD
+	// string) while keeping the QuickJS bridge on the typed repository boundary.
 	if (filters.year) {
-		conditions.push(eq(timePeriods.year, filters.year));
+		periods = periods.filter((p) => p.year === filters.year);
 	}
 	if (filters.week && filters.year) {
-		// Convert week number to date range using user's weekStartDay
 		const weekStart = getWeekStartDate(filters.year, filters.week, weekStartDay);
 		const weekEnd = addDays(weekStart, 6);
-		conditions.push(gte(timePeriods.day, formatDate(weekStart)));
-		conditions.push(lte(timePeriods.day, formatDate(weekEnd)));
+		const weekStartStr = formatDate(weekStart);
+		const weekEndStr = formatDate(weekEnd);
+		periods = periods.filter((p) => p.day !== null && p.day >= weekStartStr && p.day <= weekEndStr);
 	}
 	if (filters.month && filters.year) {
-		// Convert month to date range
 		const monthStart = `${filters.year}-${String(filters.month).padStart(2, '0')}-01`;
 		const lastDay = new Date(Date.UTC(filters.year, filters.month, 0)).getUTCDate();
 		const monthEnd = `${filters.year}-${String(filters.month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
-		conditions.push(gte(timePeriods.day, monthStart));
-		conditions.push(lte(timePeriods.day, monthEnd));
+		periods = periods.filter((p) => p.day !== null && p.day >= monthStart && p.day <= monthEnd);
 	}
 	if (filters.from && filters.to) {
-		conditions.push(gte(timePeriods.day, filters.from));
-		conditions.push(lte(timePeriods.day, filters.to));
+		const from = filters.from;
+		const to = filters.to;
+		periods = periods.filter(
+			(p) => p.day !== null && p.day >= from && p.day <= to
+		);
 	}
 
-	const periods = await db.query.timePeriods.findMany({
-		where: and(...conditions)
-	});
-
 	// Load all user templates (ordered by effectiveFrom desc) for metric resolution
-	const allTemplates = await db.query.metricsTemplates.findMany({
-		where: eq(metricsTemplates.userId, userId),
-		orderBy: [desc(metricsTemplates.effectiveFrom)]
-	});
+	const allTemplates = await services.metricsTemplates.listByUser(userId);
+	allTemplates.sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
 
 	const results: DailyRecord[] = [];
 
 	for (const period of periods) {
+		if (period.day === null) continue;
 		// Resolve metrics through the template system
-		const metrics = await resolveMetricsForDate(userId, period.day!, allTemplates);
+		const metrics = await resolveMetricsForDate(userId, period.day, allTemplates);
 
 		// Get tasks for this period
-		const periodTasks = await db.query.tasks.findMany({
-			where: eq(tasks.timePeriodId, period.id)
-		});
+		const periodTasks = await services.tasks.listByPeriod(period.id);
 
 		// Get task attributes and tags, build full TaskRecord
 		const taskRecords: TaskRecord[] = await Promise.all(
 			periodTasks.map(async (task) => {
 				const [attrs, taskTagRecords] = await Promise.all([
-					db.query.taskAttributes.findMany({
-						where: eq(taskAttributes.taskId, task.id)
-					}),
-					db.query.taskTags.findMany({
-						where: eq(taskTags.taskId, task.id)
-					})
+					services.taskAttributes.listByTask(task.id),
+					services.taskTags.listByTask(task.id)
 				]);
 
 				const tagIds = taskTagRecords.map(tt => tt.tagId);
+				const userTags = await services.tags.listByUser(userId);
 				const taskTagsList = tagIds.length > 0
-					? await db.query.tags.findMany({
-							where: eq(tags.userId, userId)
-						}).then(allTags => allTags.filter(t => tagIds.includes(t.id)))
+					? userTags.filter(t => tagIds.includes(t.id))
 					: [];
 
 				const attributes = attrs.reduce((acc, attr) => {
@@ -868,9 +852,9 @@ async function fetchDaily(userId: string, filters: QueryFilters, weekStartDay: W
 			})
 		);
 
-		const periodDate = new Date(period.day! + 'T00:00:00Z');
+		const periodDate = new Date(period.day + 'T00:00:00Z');
 		results.push({
-			date: period.day!,
+			date: period.day,
 			year: period.year,
 			month: periodDate.getUTCMonth() + 1,
 			week: getWeekNumber(periodDate, weekStartDay),
@@ -887,18 +871,12 @@ async function fetchDaily(userId: string, filters: QueryFilters, weekStartDay: W
 
 async function fetchTasks(userId: string, filters: QueryFilters, weekStartDay: WeekStartDay): Promise<TaskRecord[]> {
 	// First get the relevant time periods
-	const periodConditions = [eq(timePeriods.userId, userId)];
+	const services = await getDatabase();
+	const filtersForPeriod: { type?: 'daily' | 'weekly' | 'monthly' | 'yearly'; year?: number } = {};
+	if (filters.year) filtersForPeriod.year = filters.year;
+	if (filters.periodType) filtersForPeriod.type = filters.periodType;
 
-	if (filters.year) {
-		periodConditions.push(eq(timePeriods.year, filters.year));
-	}
-	if (filters.periodType) {
-		periodConditions.push(eq(timePeriods.periodType, filters.periodType));
-	}
-
-	let periods = await db.query.timePeriods.findMany({
-		where: and(...periodConditions)
-	});
+	let periods = await services.timePeriods.listByUser(userId, filtersForPeriod);
 
 	// Filter by week: for daily periods use date range, for weekly periods use stored week
 	if (filters.week && filters.year) {
@@ -940,9 +918,7 @@ async function fetchTasks(userId: string, filters: QueryFilters, weekStartDay: W
 	}
 
 	// Get all tasks for these periods
-	let allTasks = await db.query.tasks.findMany({
-		where: eq(tasks.userId, userId)
-	});
+	let allTasks = await services.tasks.listByUser(userId);
 
 	// Filter by period
 	allTasks = allTasks.filter(t => periodIds.includes(t.timePeriodId));
@@ -952,22 +928,18 @@ async function fetchTasks(userId: string, filters: QueryFilters, weekStartDay: W
 		allTasks = allTasks.filter(t => t.completed === filters.completed);
 	}
 
+	const userTags = await services.tags.listByUser(userId);
+
 	// Get attributes and tags for each task
 	const results: TaskRecord[] = await Promise.all(
 		allTasks.map(async (task) => {
-			const attrs = await db.query.taskAttributes.findMany({
-				where: eq(taskAttributes.taskId, task.id)
-			});
+			const attrs = await services.taskAttributes.listByTask(task.id);
 
-			const taskTagRecords = await db.query.taskTags.findMany({
-				where: eq(taskTags.taskId, task.id)
-			});
+			const taskTagRecords = await services.taskTags.listByTask(task.id);
 
 			const tagIds = taskTagRecords.map(tt => tt.tagId);
 			const taskTagsList = tagIds.length > 0
-				? await db.query.tags.findMany({
-						where: eq(tags.userId, userId)
-					}).then(allTags => allTags.filter(t => tagIds.includes(t.id)))
+				? userTags.filter(t => tagIds.includes(t.id))
 				: [];
 
 			// Get period info
@@ -1010,24 +982,19 @@ async function fetchTasks(userId: string, filters: QueryFilters, weekStartDay: W
 }
 
 async function fetchObjectives(userId: string, filters: QueryFilters): Promise<ObjectiveRecord[]> {
-	const conditions = [eq(objectives.userId, userId)];
+	const services = await getDatabase();
+	let objs = await services.objectives.listByUser(userId);
 
 	if (filters.year) {
-		conditions.push(eq(objectives.year, filters.year));
+		objs = objs.filter((o) => o.year === filters.year);
 	}
 	if (filters.level) {
-		conditions.push(eq(objectives.level, filters.level));
+		objs = objs.filter((o) => o.level === filters.level);
 	}
-
-	const objs = await db.query.objectives.findMany({
-		where: and(...conditions)
-	});
 
 	const results: ObjectiveRecord[] = await Promise.all(
 		objs.map(async (obj) => {
-			const krs = await db.query.keyResults.findMany({
-				where: eq(keyResults.objectiveId, obj.id)
-			});
+			const krs = await services.keyResults.listByObjective(obj.id);
 
 			const totalWeight = krs.reduce((sum, kr) => sum + kr.weight, 0);
 			const weightedScore = totalWeight > 0

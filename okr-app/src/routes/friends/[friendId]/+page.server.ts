@@ -1,19 +1,6 @@
 import type { PageServerLoad } from './$types';
 import { redirect, error } from '@sveltejs/kit';
-import { db } from '$lib/db/client';
-import {
-	users,
-	friendships,
-	friendNotes,
-	timePeriods,
-	tasks,
-	taskAttributes,
-	objectives,
-	keyResults,
-	taskTags,
-	tags
-} from '$lib/db/schema';
-import { eq, and, or } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import {
 	getWeekNumber,
 	getWeekStartDate,
@@ -32,32 +19,24 @@ export const load: PageServerLoad = async ({ locals, params, url }) => {
 
 	const userId = locals.user.id;
 	const friendId = params.friendId;
+	const services = await getDatabase();
 
 	// Verify friendship exists
-	const friendship = await db.query.friendships.findFirst({
-		where: or(
-			and(eq(friendships.userId1, userId), eq(friendships.userId2, friendId)),
-			and(eq(friendships.userId1, friendId), eq(friendships.userId2, userId))
-		)
-	});
+	const friendship = await services.friendships.findBetween(userId, friendId);
 
 	if (!friendship) {
 		throw error(403, 'Not friends with this user');
 	}
 
 	// Get friend's user info
-	const friend = await db.query.users.findFirst({
-		where: eq(users.id, friendId)
-	});
+	const friend = await services.users.findById(friendId);
 
 	if (!friend) {
 		throw error(404, 'User not found');
 	}
 
 	// Get private note about this friend
-	const friendNote = await db.query.friendNotes.findFirst({
-		where: and(eq(friendNotes.userId, userId), eq(friendNotes.friendId, friendId))
-	});
+	const friendNote = await services.friendNotes.findByUserAndFriend(userId, friendId);
 
 	// Use friend's timezone and week settings for calculations
 	const timezone = friend.timezone || 'UTC';
@@ -74,35 +53,24 @@ export const load: PageServerLoad = async ({ locals, params, url }) => {
 	const monthForObjectives = requestedMonth ? parseInt(requestedMonth, 10) : currentMonth;
 
 	// Get today's tasks for the friend
-	const todayPeriod = await db.query.timePeriods.findFirst({
-		where: and(
-			eq(timePeriods.userId, friendId),
-			eq(timePeriods.periodType, 'daily'),
-			eq(timePeriods.day, todayStr)
-		)
+	const todayPeriod = await services.timePeriods.find({
+		userId: friendId,
+		type: 'daily',
+		day: todayStr
 	});
 
 	let todayTasks: any[] = [];
 	if (todayPeriod) {
-		const periodTasks = await db.query.tasks.findMany({
-			where: eq(tasks.timePeriodId, todayPeriod.id),
-			orderBy: (task, { asc }) => [asc(task.sortOrder)]
-		});
+		const periodTasks = await services.tasks.listByPeriod(todayPeriod.id);
 
 		// Get friend's tags
-		const friendTags = await db.query.tags.findMany({
-			where: eq(tags.userId, friendId)
-		});
+		const friendTags = await services.tags.listByUser(friendId);
 
 		todayTasks = await Promise.all(
 			periodTasks.map(async (task) => {
-				const attributes = await db.query.taskAttributes.findMany({
-					where: eq(taskAttributes.taskId, task.id)
-				});
+				const attributes = await services.taskAttributes.listByTask(task.id);
 
-				const taskTagLinks = await db.query.taskTags.findMany({
-					where: eq(taskTags.taskId, task.id)
-				});
+				const taskTagLinks = await services.taskTags.listByTask(task.id);
 
 				const taskTagIds = taskTagLinks.map((tt) => tt.tagId);
 				const taskTagsData = friendTags.filter((t) => taskTagIds.includes(t.id));
@@ -131,37 +99,28 @@ export const load: PageServerLoad = async ({ locals, params, url }) => {
 		const date = addDays(weekStart, i);
 		const dateStr = formatDate(date);
 
-		const period = await db.query.timePeriods.findFirst({
-			where: and(
-				eq(timePeriods.userId, friendId),
-				eq(timePeriods.periodType, 'daily'),
-				eq(timePeriods.day, dateStr)
-			)
+		const period = await services.timePeriods.find({
+			userId: friendId,
+			type: 'daily',
+			day: dateStr
 		});
 
 		if (period) {
-			const dayTasks = await db.query.tasks.findMany({
-				where: eq(tasks.timePeriodId, period.id)
-			});
+			const dayTasks = await services.tasks.listByPeriod(period.id);
 			weekTotalTasks += dayTasks.length;
 			weekCompletedTasks += dayTasks.filter((t) => t.completed).length;
 		}
 	}
 
 	// Get yearly objectives with key results
-	const yearlyObjectives = await db.query.objectives.findMany({
-		where: and(
-			eq(objectives.userId, friendId),
-			eq(objectives.level, 'yearly'),
-			eq(objectives.year, currentYear)
-		)
-	});
+	const allObjectives = await services.objectives.listByUser(friendId);
+	const yearlyObjectives = allObjectives.filter(
+		(o) => o.level === 'yearly' && o.year === currentYear
+	);
 
 	const yearlyObjectivesWithKRs = await Promise.all(
 		yearlyObjectives.map(async (obj) => {
-			const krs = await db.query.keyResults.findMany({
-				where: eq(keyResults.objectiveId, obj.id)
-			});
+			const krs = await services.keyResults.listByObjective(obj.id);
 			const avgScore =
 				krs.length > 0
 					? krs.reduce((sum, kr) => sum + kr.score * kr.weight, 0) /
@@ -176,20 +135,13 @@ export const load: PageServerLoad = async ({ locals, params, url }) => {
 	);
 
 	// Get monthly objectives with key results
-	const monthlyObjectives = await db.query.objectives.findMany({
-		where: and(
-			eq(objectives.userId, friendId),
-			eq(objectives.level, 'monthly'),
-			eq(objectives.year, currentYear),
-			eq(objectives.month, monthForObjectives)
-		)
-	});
+	const monthlyObjectives = allObjectives.filter(
+		(o) => o.level === 'monthly' && o.year === currentYear && o.month === monthForObjectives
+	);
 
 	const monthlyObjectivesWithKRs = await Promise.all(
 		monthlyObjectives.map(async (obj) => {
-			const krs = await db.query.keyResults.findMany({
-				where: eq(keyResults.objectiveId, obj.id)
-			});
+			const krs = await services.keyResults.listByObjective(obj.id);
 			const avgScore =
 				krs.length > 0
 					? krs.reduce((sum, kr) => sum + kr.score * kr.weight, 0) /

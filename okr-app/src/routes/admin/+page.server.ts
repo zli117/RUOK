@@ -1,8 +1,6 @@
 import type { PageServerLoad } from './$types';
 import { redirect, error } from '@sveltejs/kit';
-import { db } from '$lib/db/client';
-import { users, queryExecutionLogs } from '$lib/db/schema';
-import { desc, gte, eq } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { getAllConfig, GLOBAL_CONFIG_FIELDS } from '$lib/server/config';
 import { getRegisteredPlugins, initializePlugins } from '$lib/server/plugins';
 
@@ -18,11 +16,11 @@ export const load: PageServerLoad = async ({ locals }) => {
 	const now = new Date();
 	const last24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 	const last7d = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+	const services = await getDatabase();
 
 	// Get all users
-	const allUsers = await db.query.users.findMany({
-		orderBy: [desc(users.createdAt)]
-	});
+	const allUsers = await services.users.list();
+	allUsers.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
 
 	const safeUsers = allUsers.map((user) => ({
 		id: user.id,
@@ -35,19 +33,12 @@ export const load: PageServerLoad = async ({ locals }) => {
 	}));
 
 	// Get recent logs
-	const recentLogs = await db.query.queryExecutionLogs.findMany({
-		orderBy: [desc(queryExecutionLogs.createdAt)],
-		limit: 50
-	});
+	const recentLogs = await services.queryExecutionLogs.list({}, { limit: 50, offset: 0 });
 
 	// Enrich logs with username
 	const userIds = [...new Set(recentLogs.map((log) => log.userId))];
 	const usersData = await Promise.all(
-		userIds.map((id) =>
-			db.query.users.findFirst({
-				where: eq(users.id, id)
-			})
-		)
+		userIds.map((id) => services.users.findById(id))
 	);
 	const usernameMap = new Map(
 		usersData.filter(Boolean).map((u) => [u!.id, u!.username])
@@ -65,13 +56,8 @@ export const load: PageServerLoad = async ({ locals }) => {
 	}));
 
 	// Get stats
-	const logs24h = await db.query.queryExecutionLogs.findMany({
-		where: gte(queryExecutionLogs.createdAt, last24h)
-	});
-
-	const logs7d = await db.query.queryExecutionLogs.findMany({
-		where: gte(queryExecutionLogs.createdAt, last7d)
-	});
+	const logs24h = await services.queryExecutionLogs.listSince(last24h);
+	const logs7d = await services.queryExecutionLogs.listSince(last7d);
 
 	const stats = {
 		users: {

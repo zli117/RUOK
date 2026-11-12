@@ -1,8 +1,6 @@
 import { redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
-import { db } from '$lib/db/client';
-import { timePeriods, tasks, taskAttributes, taskTags, tags } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { getWeekNumber, getWeekStartDate, getWeekYear, getTodayDateInTimezone, formatDate, addDays, getDayName } from '$lib/utils/week';
 
 export const load: PageServerLoad = async ({ params, locals, depends }) => {
@@ -26,20 +24,17 @@ export const load: PageServerLoad = async ({ params, locals, depends }) => {
 		throw redirect(302, `/weekly/${currentYear}/${currentWeek}`);
 	}
 
+	const services = await getDatabase();
+
 	// Fetch weekly period and tags in parallel with day processing
 	const [weeklyPeriod, userTags] = await Promise.all([
-		db.query.timePeriods.findFirst({
-			where: and(
-				eq(timePeriods.userId, locals.user.id),
-				eq(timePeriods.periodType, 'weekly'),
-				eq(timePeriods.year, year),
-				eq(timePeriods.week, week)
-			)
+		services.timePeriods.find({
+			userId: locals.user.id,
+			type: 'weekly',
+			year,
+			week
 		}),
-		db.query.tags.findMany({
-			where: eq(tags.userId, locals.user.id),
-			orderBy: (tag, { asc }) => [asc(tag.category), asc(tag.name)]
-		})
+		services.tags.listByUser(locals.user.id)
 	]);
 
 	// Get the dates for this week (using UTC-based utilities)
@@ -52,44 +47,32 @@ export const load: PageServerLoad = async ({ params, locals, depends }) => {
 		const dayName = getDayName(date);
 
 		// Find the period for this day
-		const period = await db.query.timePeriods.findFirst({
-			where: and(
-				eq(timePeriods.userId, locals.user.id),
-				eq(timePeriods.periodType, 'daily'),
-				eq(timePeriods.day, dateStr)
-			)
+		const period = await services.timePeriods.find({
+			userId: locals.user.id,
+			type: 'daily',
+			day: dateStr
 		});
 
 		let dayTasks: any[] = [];
 		if (period) {
-			const periodTasks = await db.query.tasks.findMany({
-				where: eq(tasks.timePeriodId, period.id),
-				orderBy: (task, { asc }) => [asc(task.sortOrder)]
+			const periodTasks = await services.tasks.listByPeriod(period.id);
+			const taskIds = periodTasks.map((t) => t.id);
+			const [attrMap, tagMap] = await Promise.all([
+				services.taskAttributes.listByTasks(taskIds),
+				services.taskTags.listByTasks(taskIds)
+			]);
+
+			dayTasks = periodTasks.map((task) => {
+				const attributes = (attrMap.get(task.id) ?? []).reduce(
+					(acc, attr) => {
+						acc[attr.key] = attr.value;
+						return acc;
+					},
+					{} as Record<string, string>
+				);
+				const tags = (tagMap.get(task.id) ?? []).map((t) => t.tagId);
+				return { ...task, attributes, tagIds: tags };
 			});
-
-			dayTasks = await Promise.all(
-				periodTasks.map(async (task) => {
-					const attributes = await db.query.taskAttributes.findMany({
-						where: eq(taskAttributes.taskId, task.id)
-					});
-
-					const tags = await db.query.taskTags.findMany({
-						where: eq(taskTags.taskId, task.id)
-					});
-
-					return {
-						...task,
-						attributes: attributes.reduce(
-							(acc, attr) => {
-								acc[attr.key] = attr.value;
-								return acc;
-							},
-							{} as Record<string, string>
-						),
-						tagIds: tags.map((t) => t.tagId)
-					};
-				})
-			);
 		}
 
 		days.push({
@@ -103,34 +86,24 @@ export const load: PageServerLoad = async ({ params, locals, depends }) => {
 	// Load weekly initiatives if we have a weekly period
 	let weeklyInitiatives: any[] = [];
 	if (weeklyPeriod) {
-		const weeklyTasks = await db.query.tasks.findMany({
-			where: eq(tasks.timePeriodId, weeklyPeriod.id),
-			orderBy: (task, { asc }) => [asc(task.sortOrder)]
+		const weeklyTasks = await services.tasks.listByPeriod(weeklyPeriod.id);
+		const weeklyTaskIds = weeklyTasks.map((t) => t.id);
+		const [attrMap, tagMap] = await Promise.all([
+			services.taskAttributes.listByTasks(weeklyTaskIds),
+			services.taskTags.listByTasks(weeklyTaskIds)
+		]);
+
+		weeklyInitiatives = weeklyTasks.map((task) => {
+			const attributes = (attrMap.get(task.id) ?? []).reduce(
+				(acc, attr) => {
+					acc[attr.key] = attr.value;
+					return acc;
+				},
+				{} as Record<string, string>
+			);
+			const tagIds = (tagMap.get(task.id) ?? []).map((t) => t.tagId);
+			return { ...task, attributes, tagIds };
 		});
-
-		weeklyInitiatives = await Promise.all(
-			weeklyTasks.map(async (task) => {
-				const attributes = await db.query.taskAttributes.findMany({
-					where: eq(taskAttributes.taskId, task.id)
-				});
-
-				const taskTagsResult = await db.query.taskTags.findMany({
-					where: eq(taskTags.taskId, task.id)
-				});
-
-				return {
-					...task,
-					attributes: attributes.reduce(
-						(acc, attr) => {
-							acc[attr.key] = attr.value;
-							return acc;
-						},
-						{} as Record<string, string>
-					),
-					tagIds: taskTagsResult.map((t) => t.tagId)
-				};
-			})
-		);
 	}
 
 	// Calculate weekly stats (daily tasks only)

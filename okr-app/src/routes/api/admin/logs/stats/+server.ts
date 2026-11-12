@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { queryExecutionLogs, users } from '$lib/db/schema';
-import { gte, eq } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 
 // GET /api/admin/logs/stats - Get aggregated log statistics
 export const GET: RequestHandler = async ({ locals }) => {
@@ -18,22 +16,19 @@ export const GET: RequestHandler = async ({ locals }) => {
 		const now = new Date();
 		const last24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 		const last7d = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+		const services = await getDatabase();
 
 		// Get all users count
-		const allUsers = await db.query.users.findMany();
+		const allUsers = await services.users.list();
 		const totalUsers = allUsers.length;
 		const disabledUsers = allUsers.filter((u) => u.isDisabled).length;
 		const adminUsers = allUsers.filter((u) => u.isAdmin).length;
 
 		// Get logs for last 24h
-		const logs24h = await db.query.queryExecutionLogs.findMany({
-			where: gte(queryExecutionLogs.createdAt, last24h)
-		});
+		const logs24h = await services.queryExecutionLogs.listSince(last24h);
 
 		// Get logs for last 7 days
-		const logs7d = await db.query.queryExecutionLogs.findMany({
-			where: gte(queryExecutionLogs.createdAt, last7d)
-		});
+		const logs7d = await services.queryExecutionLogs.listSince(last7d);
 
 		// Calculate stats
 		const executions24h = logs24h.length;
@@ -61,9 +56,7 @@ export const GET: RequestHandler = async ({ locals }) => {
 		// Get usernames for top users
 		const topUsers = await Promise.all(
 			topUsersById.map(async ([userId, count]) => {
-				const user = await db.query.users.findFirst({
-					where: eq(users.id, userId)
-				});
+				const user = await services.users.findById(userId);
 				return {
 					userId,
 					username: user?.username || 'Unknown',

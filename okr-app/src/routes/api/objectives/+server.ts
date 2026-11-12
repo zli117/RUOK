@@ -1,10 +1,9 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { objectives, keyResults } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
 import { broadcastDataChange } from '$lib/server/events';
+import type { ObjectiveLevel } from '$lib/db/models';
 
 // GET /api/objectives - List all objectives for the current user
 export const GET: RequestHandler = async ({ locals, url }) => {
@@ -16,21 +15,17 @@ export const GET: RequestHandler = async ({ locals, url }) => {
 	const level = url.searchParams.get('level');
 	const month = url.searchParams.get('month');
 
-	let query = db.query.objectives.findMany({
-		where: (obj, { eq, and }) => {
-			const conditions = [eq(obj.userId, locals.user!.id)];
-			if (year) conditions.push(eq(obj.year, parseInt(year)));
-			if (level) conditions.push(eq(obj.level, level as 'yearly' | 'monthly'));
-			if (month) conditions.push(eq(obj.month, parseInt(month)));
-			return and(...conditions);
-		},
-		with: {
-			// We'll add relations later
-		},
-		orderBy: (obj, { asc }) => [asc(obj.year), asc(obj.month)]
-	});
+	const db = await getDatabase();
+	const all = await db.objectives.listByUser(locals.user.id);
 
-	const result = await query;
+	let result = all;
+	if (year) result = result.filter((o) => o.year === parseInt(year));
+	if (level) result = result.filter((o) => o.level === (level as ObjectiveLevel));
+	if (month) result = result.filter((o) => o.month === parseInt(month));
+
+	// Preserve the original explicit ordering: year asc, month asc (null month first).
+	result = result.sort((a, b) => a.year - b.year || (a.month ?? -1) - (b.month ?? -1));
+
 	return json({ objectives: result });
 };
 
@@ -64,7 +59,8 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		const id = uuidv4();
 		const now = new Date();
 
-		await db.insert(objectives).values({
+		const db = await getDatabase();
+		const objective = await db.objectives.create({
 			id,
 			userId: locals.user.id,
 			title,
@@ -78,10 +74,6 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 			colorIndex: colorIndex !== undefined && colorIndex !== null ? colorIndex : null,
 			createdAt: now,
 			updatedAt: now
-		});
-
-		const objective = await db.query.objectives.findFirst({
-			where: eq(objectives.id, id)
 		});
 
 		// Broadcast change to other connected clients

@@ -4,7 +4,7 @@
  */
 
 import { getQuickJS, type QuickJSContext, type QuickJSHandle } from 'quickjs-emscripten';
-import type { MetricDefinition } from '$lib/db/schema';
+import type { MetricDefinition } from '$lib/db/models';
 
 const EXECUTION_TIMEOUT_MS = 1000; // Shorter timeout for expressions
 const MAX_MEMORY_BYTES = 16 * 1024 * 1024; // 16MB

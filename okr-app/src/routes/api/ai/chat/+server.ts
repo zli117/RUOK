@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { userAiConfig } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import {
 	sendMessage,
 	PROVIDER_DEFAULTS,
@@ -48,9 +46,8 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 			return json({ error: 'Messages are required' }, { status: 400 });
 		}
 
-		const config = await db.query.userAiConfig.findFirst({
-			where: eq(userAiConfig.userId, locals.user.id)
-		});
+		const services = await getDatabase();
+		const config = await services.userAiConfig.findByUser(locals.user.id);
 
 		if (!config) {
 			return json(

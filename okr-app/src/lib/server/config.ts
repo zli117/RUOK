@@ -4,9 +4,7 @@
  * with in-memory caching and environment variable fallback.
  */
 
-import { db } from '$lib/db/client';
-import { systemConfig } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { env } from '$env/dynamic/private';
 import type { AdminConfigField } from './plugins/types';
 
@@ -41,7 +39,8 @@ export const GLOBAL_CONFIG_FIELDS: AdminConfigField[] = [
 async function loadCache(): Promise<Map<string, string>> {
 	if (cache && Date.now() < cacheExpiry) return cache;
 
-	const rows = await db.select().from(systemConfig);
+	const db = await getDatabase();
+	const rows = await db.systemConfig.all();
 	cache = new Map(rows.map((r) => [r.key, r.value]));
 	cacheExpiry = Date.now() + CACHE_TTL_MS;
 	return cache;
@@ -101,21 +100,13 @@ export async function setConfigValue(
 	value: string,
 	isSecret: boolean
 ): Promise<void> {
-	const existing = await db.select().from(systemConfig).where(eq(systemConfig.key, key));
-
-	if (existing.length > 0) {
-		await db
-			.update(systemConfig)
-			.set({ value, isSecret, updatedAt: new Date() })
-			.where(eq(systemConfig.key, key));
-	} else {
-		await db.insert(systemConfig).values({
-			key,
-			value,
-			isSecret,
-			updatedAt: new Date()
-		});
-	}
+	const db = await getDatabase();
+	await db.systemConfig.upsert({
+		key,
+		value,
+		isSecret,
+		updatedAt: new Date()
+	});
 
 	invalidateCache();
 }
@@ -124,7 +115,8 @@ export async function setConfigValue(
  * Get all config entries for the admin UI. Secret values are masked.
  */
 export async function getAllConfig(): Promise<Array<{ key: string; value: string; isSecret: boolean }>> {
-	const rows = await db.select().from(systemConfig);
+	const db = await getDatabase();
+	const rows = await db.systemConfig.all();
 	return rows.map((r) => ({
 		key: r.key,
 		value: r.isSecret ? '' : r.value,

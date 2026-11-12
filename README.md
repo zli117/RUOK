@@ -118,7 +118,7 @@ cd okr-app
 export ADMIN_USERNAME=admin  # You still need to create this user
 export DATA_DIR=data
 npm install
-npm run db:push
+npm run db:migrate
 npm run dev
 ```
 
@@ -128,10 +128,14 @@ Opens on `http://localhost:5180/`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_PATH` | `/app/data/okr.db` | Path to SQLite database inside the container |
+| `DATABASE_TYPE` | `sqlite` | `sqlite` (default) or `postgres`; selects the backend |
+| `DATABASE_PATH` | `/app/data/okr.db` | Path to SQLite database (SQLite mode only) |
+| `DATABASE_URL` | *(none)* | Required for PostgreSQL mode |
 | `ADMIN_USERNAME` | *(none)* | Username that gets admin privileges on login |
 
-Note that you still need to create the admin user.
+Note that you still need to create the admin user. See
+[`okr-app/docs/DATABASES.md`](okr-app/docs/DATABASES.md) for the full database
+configuration reference, migration operations, and backup/recovery.
 
 ---
 
@@ -142,6 +146,8 @@ RUOK runs on modest hardware. A Raspberry Pi 4 with 2GB RAM is plenty.
 | Guide | What it covers |
 |-------|---------------|
 | [Setup Guide](okr-app/docs/SETUP.md) | Raspberry Pi deployment with Docker, Caddy, HTTPS, DNS, backups |
+| [Databases](okr-app/docs/DATABASES.md) | SQLite and PostgreSQL configuration, migrations, native backup/recovery |
+| [CNPG Handoff](okr-app/docs/CNPG-HANDOFF.md) | Deploying RUOK in PostgreSQL mode against CloudNativePG (external inputs) |
 | [Maintenance Playbook](okr-app/docs/MAINTENANCE.md) | Reverse proxy configs, monitoring, troubleshooting |
 | [Query API Reference](okr-app/docs/QUERY_API_REFERENCE.md) | Complete JavaScript query sandbox API |
 
@@ -152,7 +158,7 @@ RUOK runs on modest hardware. A Raspberry Pi 4 with 2GB RAM is plenty.
 | Layer | Technology |
 |-------|-----------|
 | Framework | SvelteKit 5 with Svelte 5 runes |
-| Database | SQLite + Drizzle ORM |
+| Database | SQLite (default) or PostgreSQL + Drizzle ORM |
 | Query Sandbox | QuickJS (WebAssembly) |
 | AI Providers | Anthropic, OpenAI, Gemini, OpenRouter, Ollama |
 | Charts | Plotly.js |

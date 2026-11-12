@@ -1,8 +1,6 @@
 import { redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
-import { db } from '$lib/db/client';
-import { timePeriods, tasks, taskAttributes, taskTags } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { getWeekNumber, getWeekYear, getTodayInTimezone } from '$lib/utils/week';
 
 export const load: PageServerLoad = async ({ params, locals, fetch, depends }) => {
@@ -30,18 +28,18 @@ export const load: PageServerLoad = async ({ params, locals, fetch, depends }) =
 	const weekYear = getWeekYear(dateObj, weekStartDay);
 	const weekNumber = getWeekNumber(dateObj, weekStartDay);
 
+	const services = await getDatabase();
+
 	// Fetch daily data, tags, and weekly period in parallel
 	// (metrics are loaded client-side to avoid blocking on slow plugin API calls)
 	const [response, tagsResponse, weeklyPeriod] = await Promise.all([
 		fetch(`/api/periods/daily/${dateStr}`),
 		fetch('/api/tags'),
-		db.query.timePeriods.findFirst({
-			where: and(
-				eq(timePeriods.userId, locals.user.id),
-				eq(timePeriods.periodType, 'weekly'),
-				eq(timePeriods.year, weekYear),
-				eq(timePeriods.week, weekNumber)
-			)
+		services.timePeriods.find({
+			userId: locals.user.id,
+			type: 'weekly',
+			year: weekYear,
+			week: weekNumber
 		})
 	]);
 
@@ -65,34 +63,24 @@ export const load: PageServerLoad = async ({ params, locals, fetch, depends }) =
 	// Load weekly initiatives if we have a weekly period
 	let weeklyInitiatives: any[] = [];
 	if (weeklyPeriod) {
-		const weeklyTasks = await db.query.tasks.findMany({
-			where: eq(tasks.timePeriodId, weeklyPeriod.id),
-			orderBy: (task, { asc }) => [asc(task.sortOrder)]
+		const weeklyTasks = await services.tasks.listByPeriod(weeklyPeriod.id);
+		const taskIds = weeklyTasks.map((t) => t.id);
+		const [attrMap, tagMap] = await Promise.all([
+			services.taskAttributes.listByTasks(taskIds),
+			services.taskTags.listByTasks(taskIds)
+		]);
+
+		weeklyInitiatives = weeklyTasks.map((task) => {
+			const attributes = (attrMap.get(task.id) ?? []).reduce(
+				(acc, attr) => {
+					acc[attr.key] = attr.value;
+					return acc;
+				},
+				{} as Record<string, string>
+			);
+			const tagIds = (tagMap.get(task.id) ?? []).map((t) => t.tagId);
+			return { ...task, attributes, tagIds };
 		});
-
-		weeklyInitiatives = await Promise.all(
-			weeklyTasks.map(async (task) => {
-				const attributes = await db.query.taskAttributes.findMany({
-					where: eq(taskAttributes.taskId, task.id)
-				});
-
-				const tags = await db.query.taskTags.findMany({
-					where: eq(taskTags.taskId, task.id)
-				});
-
-				return {
-					...task,
-					attributes: attributes.reduce(
-						(acc, attr) => {
-							acc[attr.key] = attr.value;
-							return acc;
-						},
-						{} as Record<string, string>
-					),
-					tagIds: tags.map((t) => t.tagId)
-				};
-			})
-		);
 	}
 
 	return {
@@ -107,4 +95,3 @@ export const load: PageServerLoad = async ({ params, locals, fetch, depends }) =
 		weekNumber
 	};
 };
-

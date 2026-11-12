@@ -1,8 +1,6 @@
 import type { PageServerLoad } from './$types';
 import { redirect } from '@sveltejs/kit';
-import { db } from '$lib/db/client';
-import { users, friendRequests, friendships, friendNotes } from '$lib/db/schema';
-import { eq, and, or } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 
 export const load: PageServerLoad = async ({ locals }) => {
 	if (!locals.user) {
@@ -10,11 +8,10 @@ export const load: PageServerLoad = async ({ locals }) => {
 	}
 
 	const userId = locals.user.id;
+	const services = await getDatabase();
 
 	// Get all friendships
-	const userFriendships = await db.query.friendships.findMany({
-		where: or(eq(friendships.userId1, userId), eq(friendships.userId2, userId))
-	});
+	const userFriendships = await services.friendships.listForUser(userId);
 
 	// Get friend IDs
 	const friendIds = userFriendships.map((f) => (f.userId1 === userId ? f.userId2 : f.userId1));
@@ -22,14 +19,9 @@ export const load: PageServerLoad = async ({ locals }) => {
 	// Get friend details
 	const friends = await Promise.all(
 		friendIds.map(async (friendId) => {
-			const friend = await db.query.users.findFirst({
-				where: eq(users.id, friendId),
-				columns: { id: true, username: true }
-			});
+			const friend = await services.users.findById(friendId);
 
-			const note = await db.query.friendNotes.findFirst({
-				where: and(eq(friendNotes.userId, userId), eq(friendNotes.friendId, friendId))
-			});
+			const note = await services.friendNotes.findByUserAndFriend(userId, friendId);
 
 			const friendship = userFriendships.find(
 				(f) =>
@@ -47,16 +39,11 @@ export const load: PageServerLoad = async ({ locals }) => {
 	);
 
 	// Get pending incoming requests
-	const incomingRequests = await db.query.friendRequests.findMany({
-		where: and(eq(friendRequests.toUserId, userId), eq(friendRequests.status, 'pending'))
-	});
+	const incomingRequests = await services.friendRequests.listIncomingPending(userId);
 
 	const incoming = await Promise.all(
 		incomingRequests.map(async (req) => {
-			const fromUser = await db.query.users.findFirst({
-				where: eq(users.id, req.fromUserId),
-				columns: { id: true, username: true }
-			});
+			const fromUser = await services.users.findById(req.fromUserId);
 			return {
 				id: req.id,
 				fromUserId: req.fromUserId,
@@ -67,16 +54,11 @@ export const load: PageServerLoad = async ({ locals }) => {
 	);
 
 	// Get pending outgoing requests
-	const outgoingRequests = await db.query.friendRequests.findMany({
-		where: and(eq(friendRequests.fromUserId, userId), eq(friendRequests.status, 'pending'))
-	});
+	const outgoingRequests = await services.friendRequests.listOutgoingPending(userId);
 
 	const outgoing = await Promise.all(
 		outgoingRequests.map(async (req) => {
-			const toUser = await db.query.users.findFirst({
-				where: eq(users.id, req.toUserId),
-				columns: { id: true, username: true }
-			});
+			const toUser = await services.users.findById(req.toUserId);
 			return {
 				id: req.id,
 				toUserId: req.toUserId,

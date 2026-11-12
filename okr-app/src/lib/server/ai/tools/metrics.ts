@@ -1,7 +1,5 @@
-import { db } from '$lib/db/client';
-import { metricsTemplates, dailyMetricValues } from '$lib/db/schema';
-import type { MetricDefinition } from '$lib/db/schema';
-import { eq, and, lte, desc } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
+import type { MetricDefinition } from '$lib/db/models';
 import { v4 as uuidv4 } from 'uuid';
 import { broadcastDataChange } from '$lib/server/events';
 import type { ToolDef } from './types';
@@ -17,10 +15,8 @@ type DefinitionInput = {
 };
 
 async function getActiveTemplate(userId: string, date: string) {
-	return db.query.metricsTemplates.findFirst({
-		where: and(eq(metricsTemplates.userId, userId), lte(metricsTemplates.effectiveFrom, date)),
-		orderBy: [desc(metricsTemplates.effectiveFrom)]
-	});
+	const services = await getDatabase();
+	return services.metricsTemplates.findActiveByDate(userId, date);
 }
 
 interface ListMetricsArgs {
@@ -42,9 +38,8 @@ export const listMetrics: ToolDef<ListMetricsArgs> = {
 		const template = await getActiveTemplate(ctx.userId, args.date);
 		if (!template) return { template: null, values: {} };
 		const definitions: MetricDefinition[] = JSON.parse(template.metricsDefinition);
-		const stored = await db.query.dailyMetricValues.findMany({
-			where: and(eq(dailyMetricValues.userId, ctx.userId), eq(dailyMetricValues.date, args.date))
-		});
+		const services = await getDatabase();
+		const stored = await services.dailyMetricValues.listByUserAndDate(ctx.userId, args.date);
 		const values: Record<string, string | null> = {};
 		for (const v of stored) values[v.metricName] = v.value;
 		return {
@@ -90,28 +85,15 @@ export const setMetricValue: ToolDef<SetMetricValueArgs> = {
 		if (def.type !== 'input') throw new Error(`Metric "${args.name}" is ${def.type}, cannot be set directly`);
 
 		const stringValue = args.value === null ? null : String(args.value);
-		const existing = await db.query.dailyMetricValues.findFirst({
-			where: and(
-				eq(dailyMetricValues.userId, ctx.userId),
-				eq(dailyMetricValues.date, args.date),
-				eq(dailyMetricValues.metricName, args.name)
-			)
+		const services = await getDatabase();
+		await services.dailyMetricValues.upsert({
+			id: uuidv4(),
+			userId: ctx.userId,
+			date: args.date,
+			metricName: args.name,
+			value: stringValue,
+			source: 'user'
 		});
-		if (existing) {
-			await db
-				.update(dailyMetricValues)
-				.set({ value: stringValue })
-				.where(eq(dailyMetricValues.id, existing.id));
-		} else {
-			await db.insert(dailyMetricValues).values({
-				id: uuidv4(),
-				userId: ctx.userId,
-				date: args.date,
-				metricName: args.name,
-				value: stringValue,
-				source: 'user'
-			});
-		}
 		broadcastDataChange(ctx.userId, 'data:metrics');
 		return { ok: true };
 	}
@@ -125,10 +107,9 @@ export const listMetricsTemplates: ToolDef = {
 	parameters: { type: 'object', properties: {} },
 	preview: () => 'List metrics templates',
 	async execute(ctx) {
-		const rows = await db.query.metricsTemplates.findMany({
-			where: eq(metricsTemplates.userId, ctx.userId),
-			orderBy: [desc(metricsTemplates.effectiveFrom)]
-		});
+		const services = await getDatabase();
+		const rows = await services.metricsTemplates.listByUser(ctx.userId);
+		rows.sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
 		return {
 			templates: rows.map((t) => ({
 				id: t.id,
@@ -167,7 +148,8 @@ export const createMetricsTemplate: ToolDef<CreateTemplateArgs, { templateId: st
 	preview: (a) => `Create metrics template (effective ${a.effectiveFrom}, ${a.metricsDefinition.length} fields)`,
 	async execute(ctx, args) {
 		const id = uuidv4();
-		await db.insert(metricsTemplates).values({
+		const services = await getDatabase();
+		await services.metricsTemplates.create({
 			id,
 			userId: ctx.userId,
 			name: args.name ?? 'default',
@@ -203,16 +185,15 @@ export const updateMetricsTemplate: ToolDef<UpdateTemplateArgs> = {
 	},
 	preview: (a) => `Update metrics template ${a.templateId.slice(0, 8)}`,
 	async execute(ctx, args) {
-		const existing = await db.query.metricsTemplates.findFirst({
-			where: and(eq(metricsTemplates.id, args.templateId), eq(metricsTemplates.userId, ctx.userId))
-		});
-		if (!existing) throw new Error('Template not found');
-		const updates: Record<string, unknown> = { updatedAt: new Date() };
+		const services = await getDatabase();
+		const existing = await services.metricsTemplates.findById(args.templateId);
+		if (!existing || existing.userId !== ctx.userId) throw new Error('Template not found');
+		const updates: { name?: string; effectiveFrom?: string; metricsDefinition?: string; updatedAt?: Date } = { updatedAt: new Date() };
 		if (args.name !== undefined) updates.name = args.name;
 		if (args.effectiveFrom !== undefined) updates.effectiveFrom = args.effectiveFrom;
 		if (args.metricsDefinition !== undefined)
 			updates.metricsDefinition = JSON.stringify(args.metricsDefinition);
-		await db.update(metricsTemplates).set(updates).where(eq(metricsTemplates.id, args.templateId));
+		await services.metricsTemplates.update(args.templateId, updates);
 		broadcastDataChange(ctx.userId, 'data:metrics');
 		return { ok: true };
 	}
@@ -233,11 +214,10 @@ export const deleteMetricsTemplate: ToolDef<DeleteTemplateArgs> = {
 	},
 	preview: (a) => `Delete metrics template ${a.templateId.slice(0, 8)}`,
 	async execute(ctx, args) {
-		const existing = await db.query.metricsTemplates.findFirst({
-			where: and(eq(metricsTemplates.id, args.templateId), eq(metricsTemplates.userId, ctx.userId))
-		});
-		if (!existing) throw new Error('Template not found');
-		await db.delete(metricsTemplates).where(eq(metricsTemplates.id, args.templateId));
+		const services = await getDatabase();
+		const existing = await services.metricsTemplates.findById(args.templateId);
+		if (!existing || existing.userId !== ctx.userId) throw new Error('Template not found');
+		await services.metricsTemplates.remove(args.templateId);
 		broadcastDataChange(ctx.userId, 'data:metrics');
 		return { ok: true };
 	}

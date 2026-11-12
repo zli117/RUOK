@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { tags } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 
 // PUT /api/tags/[id] - Update a tag
 export const PUT: RequestHandler = async ({ locals, params, request }) => {
@@ -15,37 +13,26 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 		const body = await request.json();
 		const { name, color, category } = body;
 
-		// Verify tag belongs to user
-		const existing = await db.query.tags.findFirst({
-			where: and(eq(tags.id, id), eq(tags.userId, locals.user.id))
-		});
+		const services = await getDatabase();
 
-		if (!existing) {
+		// Verify tag belongs to user
+		const existing = await services.tags.findById(id);
+		if (!existing || existing.userId !== locals.user.id) {
 			return json({ error: 'Tag not found' }, { status: 404 });
 		}
 
 		// Check for duplicate name (excluding current tag)
 		if (name && name.trim() !== existing.name) {
-			const duplicate = await db.query.tags.findFirst({
-				where: and(eq(tags.userId, locals.user.id), eq(tags.name, name.trim()))
-			});
-
-			if (duplicate) {
+			const duplicate = await services.tags.findByUserAndName(locals.user.id, name.trim());
+			if (duplicate && duplicate.id !== id) {
 				return json({ error: 'Tag with this name already exists' }, { status: 409 });
 			}
 		}
 
-		await db
-			.update(tags)
-			.set({
-				name: name?.trim() ?? existing.name,
-				color: color !== undefined ? color : existing.color,
-				category: category !== undefined ? category : existing.category
-			})
-			.where(eq(tags.id, id));
-
-		const tag = await db.query.tags.findFirst({
-			where: eq(tags.id, id)
+		const tag = await services.tags.update(id, {
+			name: name?.trim() ?? existing.name,
+			color: color !== undefined ? color : existing.color,
+			category: category !== undefined ? category : existing.category
 		});
 
 		return json({ tag });
@@ -64,16 +51,15 @@ export const DELETE: RequestHandler = async ({ locals, params }) => {
 	try {
 		const { id } = params;
 
-		// Verify tag belongs to user
-		const existing = await db.query.tags.findFirst({
-			where: and(eq(tags.id, id), eq(tags.userId, locals.user.id))
-		});
+		const services = await getDatabase();
 
-		if (!existing) {
+		// Verify tag belongs to user
+		const existing = await services.tags.findById(id);
+		if (!existing || existing.userId !== locals.user.id) {
 			return json({ error: 'Tag not found' }, { status: 404 });
 		}
 
-		await db.delete(tags).where(eq(tags.id, id));
+		await services.tags.remove(id);
 
 		return json({ success: true });
 	} catch (error) {

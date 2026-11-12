@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { metricsTemplates } from '$lib/db/schema';
-import { eq, desc } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { randomUUID } from 'crypto';
 
 // GET /api/metrics/templates - List all templates for the user
@@ -11,10 +9,8 @@ export const GET: RequestHandler = async ({ locals }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const templates = await db.query.metricsTemplates.findMany({
-		where: eq(metricsTemplates.userId, locals.user.id),
-		orderBy: [desc(metricsTemplates.effectiveFrom)]
-	});
+	const services = await getDatabase();
+	const templates = await services.metricsTemplates.listByUser(locals.user.id);
 
 	return json({ templates });
 };
@@ -37,18 +33,14 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 			return json({ error: 'metricsDefinition must be an array' }, { status: 400 });
 		}
 
-		const id = randomUUID();
+		const services = await getDatabase();
 
-		await db.insert(metricsTemplates).values({
-			id,
+		const template = await services.metricsTemplates.create({
+			id: randomUUID(),
 			userId: locals.user.id,
 			name: name || 'default',
 			effectiveFrom,
 			metricsDefinition: JSON.stringify(metricsDefinition)
-		});
-
-		const template = await db.query.metricsTemplates.findFirst({
-			where: eq(metricsTemplates.id, id)
 		});
 
 		return json({ template }, { status: 201 });

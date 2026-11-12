@@ -1,6 +1,4 @@
-import { db } from '$lib/db/client';
-import { savedQueries } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
 import { executeQuery } from '$lib/server/query/executor';
 import { broadcastDataChange } from '$lib/server/events';
@@ -24,14 +22,10 @@ export const listSavedQueries: ToolDef<ListQueriesArgs> = {
 	},
 	preview: (a) => `List saved queries${a.queryType ? ` (${a.queryType})` : ''}`,
 	async execute(ctx, args) {
+		const services = await getDatabase();
 		const rows = args.queryType
-			? await db.query.savedQueries.findMany({
-					where: and(
-						eq(savedQueries.userId, ctx.userId),
-						eq(savedQueries.queryType, args.queryType)
-					)
-				})
-			: await db.query.savedQueries.findMany({ where: eq(savedQueries.userId, ctx.userId) });
+			? await services.savedQueries.listByUser(ctx.userId, { queryType: args.queryType })
+			: await services.savedQueries.listByUser(ctx.userId);
 		return {
 			queries: rows.map((q) => ({
 				id: q.id,
@@ -59,9 +53,8 @@ export const getSavedQuery: ToolDef<GetQueryArgs> = {
 	},
 	preview: (a) => `Get saved query ${a.queryId.slice(0, 8)}`,
 	async execute(ctx, args) {
-		const q = await db.query.savedQueries.findFirst({
-			where: and(eq(savedQueries.id, args.queryId), eq(savedQueries.userId, ctx.userId))
-		});
+		const services = await getDatabase();
+		const q = await services.savedQueries.findByIdForUser(args.queryId, ctx.userId);
 		if (!q) throw new Error('Query not found');
 		return { query: q };
 	}
@@ -93,7 +86,8 @@ export const createSavedQuery: ToolDef<CreateQueryArgs, { queryId: string }> = {
 	async execute(ctx, args) {
 		const id = uuidv4();
 		const now = new Date();
-		await db.insert(savedQueries).values({
+		const services = await getDatabase();
+		await services.savedQueries.create({
 			id,
 			userId: ctx.userId,
 			name: args.name.trim(),
@@ -133,16 +127,15 @@ export const updateSavedQuery: ToolDef<UpdateQueryArgs> = {
 	},
 	preview: (a) => `Update query ${a.queryId.slice(0, 8)}`,
 	async execute(ctx, args) {
-		const existing = await db.query.savedQueries.findFirst({
-			where: and(eq(savedQueries.id, args.queryId), eq(savedQueries.userId, ctx.userId))
-		});
+		const services = await getDatabase();
+		const existing = await services.savedQueries.findByIdForUser(args.queryId, ctx.userId);
 		if (!existing) throw new Error('Query not found');
-		const updates: Record<string, unknown> = { updatedAt: new Date() };
+		const updates: { name?: string; description?: string | null; code?: string; queryType?: QueryType; updatedAt?: Date } = { updatedAt: new Date() };
 		if (args.name !== undefined) updates.name = args.name.trim();
 		if (args.description !== undefined) updates.description = args.description?.trim() ?? null;
 		if (args.code !== undefined) updates.code = args.code;
 		if (args.queryType !== undefined) updates.queryType = args.queryType;
-		await db.update(savedQueries).set(updates).where(eq(savedQueries.id, args.queryId));
+		await services.savedQueries.update(args.queryId, updates);
 		broadcastDataChange(ctx.userId, 'data:queries');
 		return { ok: true };
 	}
@@ -163,11 +156,10 @@ export const deleteSavedQuery: ToolDef<DeleteQueryArgs> = {
 	},
 	preview: (a) => `Delete query ${a.queryId.slice(0, 8)}`,
 	async execute(ctx, args) {
-		const existing = await db.query.savedQueries.findFirst({
-			where: and(eq(savedQueries.id, args.queryId), eq(savedQueries.userId, ctx.userId))
-		});
+		const services = await getDatabase();
+		const existing = await services.savedQueries.findByIdForUser(args.queryId, ctx.userId);
 		if (!existing) throw new Error('Query not found');
-		await db.delete(savedQueries).where(eq(savedQueries.id, args.queryId));
+		await services.savedQueries.remove(args.queryId);
 		broadcastDataChange(ctx.userId, 'data:queries');
 		return { ok: true };
 	}
@@ -198,9 +190,8 @@ export const runQuery: ToolDef<RunQueryArgs> = {
 		let code = args.code;
 		if (!code) {
 			if (!args.queryId) throw new Error('Either queryId or code is required');
-			const q = await db.query.savedQueries.findFirst({
-				where: and(eq(savedQueries.id, args.queryId), eq(savedQueries.userId, ctx.userId))
-			});
+			const services = await getDatabase();
+			const q = await services.savedQueries.findByIdForUser(args.queryId, ctx.userId);
 			if (!q) throw new Error('Query not found');
 			code = q.code;
 		}

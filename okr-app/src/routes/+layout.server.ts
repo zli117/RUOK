@@ -1,7 +1,5 @@
 import type { LayoutServerLoad } from './$types';
-import { db } from '$lib/db/client';
-import { userAiConfig } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 
 export const load: LayoutServerLoad = async ({ locals }) => {
 	let aiConfig = {
@@ -12,9 +10,8 @@ export const load: LayoutServerLoad = async ({ locals }) => {
 	};
 
 	if (locals.user) {
-		const config = await db.query.userAiConfig.findFirst({
-			where: eq(userAiConfig.userId, locals.user.id)
-		});
+		const services = await getDatabase();
+		const config = await services.userAiConfig.findByUser(locals.user.id);
 
 		if (config) {
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { metricsTemplates } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 
 // GET /api/metrics/templates/[id] - Get a specific template
 export const GET: RequestHandler = async ({ locals, params }) => {
@@ -10,14 +8,10 @@ export const GET: RequestHandler = async ({ locals, params }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const template = await db.query.metricsTemplates.findFirst({
-		where: and(
-			eq(metricsTemplates.id, params.id),
-			eq(metricsTemplates.userId, locals.user.id)
-		)
-	});
+	const services = await getDatabase();
+	const template = await services.metricsTemplates.findById(params.id);
 
-	if (!template) {
+	if (!template || template.userId !== locals.user.id) {
 		return json({ error: 'Template not found' }, { status: 404 });
 	}
 
@@ -30,14 +24,9 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const existing = await db.query.metricsTemplates.findFirst({
-		where: and(
-			eq(metricsTemplates.id, params.id),
-			eq(metricsTemplates.userId, locals.user.id)
-		)
-	});
-
-	if (!existing) {
+	const services = await getDatabase();
+	const existing = await services.metricsTemplates.findById(params.id);
+	if (!existing || existing.userId !== locals.user.id) {
 		return json({ error: 'Template not found' }, { status: 404 });
 	}
 
@@ -58,11 +47,7 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 			updates.metricsDefinition = JSON.stringify(metricsDefinition);
 		}
 
-		await db.update(metricsTemplates).set(updates).where(eq(metricsTemplates.id, params.id));
-
-		const updated = await db.query.metricsTemplates.findFirst({
-			where: eq(metricsTemplates.id, params.id)
-		});
+		const updated = await services.metricsTemplates.update(params.id, updates);
 
 		return json({ template: updated });
 	} catch (error) {
@@ -77,18 +62,13 @@ export const DELETE: RequestHandler = async ({ locals, params }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const existing = await db.query.metricsTemplates.findFirst({
-		where: and(
-			eq(metricsTemplates.id, params.id),
-			eq(metricsTemplates.userId, locals.user.id)
-		)
-	});
-
-	if (!existing) {
+	const services = await getDatabase();
+	const existing = await services.metricsTemplates.findById(params.id);
+	if (!existing || existing.userId !== locals.user.id) {
 		return json({ error: 'Template not found' }, { status: 404 });
 	}
 
-	await db.delete(metricsTemplates).where(eq(metricsTemplates.id, params.id));
+	await services.metricsTemplates.remove(params.id);
 
 	return json({ success: true });
 };

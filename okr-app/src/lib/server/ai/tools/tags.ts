@@ -1,6 +1,4 @@
-import { db } from '$lib/db/client';
-import { tags, taskTags, tasks } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
 import { broadcastDataChange } from '$lib/server/events';
 import type { ToolDef } from './types';
@@ -12,10 +10,9 @@ export const listTags: ToolDef = {
 	parameters: { type: 'object', properties: {} },
 	preview: () => 'List all tags',
 	async execute(ctx) {
-		const rows = await db.query.tags.findMany({
-			where: eq(tags.userId, ctx.userId),
-			orderBy: (t, { asc }) => [asc(t.category), asc(t.name)]
-		});
+		const services = await getDatabase();
+		const rows = await services.tags.listByUser(ctx.userId);
+		rows.sort((a, b) => (a.category ?? '').localeCompare(b.category ?? '') || a.name.localeCompare(b.name));
 		return { tags: rows };
 	}
 };
@@ -41,12 +38,11 @@ export const createTag: ToolDef<CreateTagArgs, { tagId: string }> = {
 	},
 	preview: (a) => `Create tag "${a.name}"${a.category ? ` (${a.category})` : ''}`,
 	async execute(ctx, args) {
-		const existing = await db.query.tags.findFirst({
-			where: and(eq(tags.userId, ctx.userId), eq(tags.name, args.name.trim()))
-		});
+		const services = await getDatabase();
+		const existing = await services.tags.findByUserAndName(ctx.userId, args.name.trim());
 		if (existing) throw new Error('Tag with this name already exists');
 		const id = uuidv4();
-		await db.insert(tags).values({
+		await services.tags.create({
 			id,
 			userId: ctx.userId,
 			name: args.name.trim(),
@@ -81,18 +77,14 @@ export const updateTag: ToolDef<UpdateTagArgs> = {
 	},
 	preview: (a) => `Update tag ${a.tagId.slice(0, 8)}`,
 	async execute(ctx, args) {
-		const existing = await db.query.tags.findFirst({
-			where: and(eq(tags.id, args.tagId), eq(tags.userId, ctx.userId))
+		const services = await getDatabase();
+		const existing = await services.tags.findById(args.tagId);
+		if (!existing || existing.userId !== ctx.userId) throw new Error('Tag not found');
+		await services.tags.update(args.tagId, {
+			name: args.name?.trim() ?? existing.name,
+			color: args.color !== undefined ? args.color : existing.color,
+			category: args.category !== undefined ? args.category : existing.category
 		});
-		if (!existing) throw new Error('Tag not found');
-		await db
-			.update(tags)
-			.set({
-				name: args.name?.trim() ?? existing.name,
-				color: args.color !== undefined ? args.color : existing.color,
-				category: args.category !== undefined ? args.category : existing.category
-			})
-			.where(eq(tags.id, args.tagId));
 		broadcastDataChange(ctx.userId, 'data:tags');
 		return { ok: true };
 	}
@@ -113,11 +105,10 @@ export const deleteTag: ToolDef<DeleteTagArgs> = {
 	},
 	preview: (a) => `Delete tag ${a.tagId.slice(0, 8)}`,
 	async execute(ctx, args) {
-		const existing = await db.query.tags.findFirst({
-			where: and(eq(tags.id, args.tagId), eq(tags.userId, ctx.userId))
-		});
-		if (!existing) throw new Error('Tag not found');
-		await db.delete(tags).where(eq(tags.id, args.tagId));
+		const services = await getDatabase();
+		const existing = await services.tags.findById(args.tagId);
+		if (!existing || existing.userId !== ctx.userId) throw new Error('Tag not found');
+		await services.tags.remove(args.tagId);
 		broadcastDataChange(ctx.userId, 'data:tags', 'data:tasks');
 		return { ok: true };
 	}
@@ -143,23 +134,18 @@ export const setTaskTags: ToolDef<SetTaskTagsArgs> = {
 	},
 	preview: (a) => `Set tags on task ${a.taskId.slice(0, 8)} (${a.tagIds.length} tags)`,
 	async execute(ctx, args) {
-		const task = await db.query.tasks.findFirst({
-			where: and(eq(tasks.id, args.taskId), eq(tasks.userId, ctx.userId))
-		});
-		if (!task) throw new Error('Task not found');
+		const services = await getDatabase();
+		const task = await services.tasks.findById(args.taskId);
+		if (!task || task.userId !== ctx.userId) throw new Error('Task not found');
 
 		// Verify all tag ids belong to user
 		for (const tagId of args.tagIds) {
-			const t = await db.query.tags.findFirst({
-				where: and(eq(tags.id, tagId), eq(tags.userId, ctx.userId))
-			});
-			if (!t) throw new Error(`Tag not found: ${tagId}`);
+			const t = await services.tags.findById(tagId);
+			if (!t || t.userId !== ctx.userId) throw new Error(`Tag not found: ${tagId}`);
 		}
 
-		await db.delete(taskTags).where(eq(taskTags.taskId, args.taskId));
-		for (const tagId of args.tagIds) {
-			await db.insert(taskTags).values({ taskId: args.taskId, tagId });
-		}
+		// Atomically replace the tag links (bounded atomic operation).
+		await services.updateTaskWithDetails({ id: args.taskId, patch: {}, tagIds: args.tagIds });
 		broadcastDataChange(ctx.userId, 'data:tasks', 'data:weekly');
 		return { ok: true };
 	}

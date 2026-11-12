@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { timePeriods, dailyMetrics } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
 
 // GET /api/metrics/daily/[date] - Get metrics for a specific date
@@ -17,22 +15,20 @@ export const GET: RequestHandler = async ({ locals, params }) => {
 		return json({ error: 'Invalid date format. Use YYYY-MM-DD' }, { status: 400 });
 	}
 
+	const services = await getDatabase();
+
 	// Find the time period for this date
-	const period = await db.query.timePeriods.findFirst({
-		where: and(
-			eq(timePeriods.userId, locals.user.id),
-			eq(timePeriods.periodType, 'daily'),
-			eq(timePeriods.day, dateStr)
-		)
+	const period = await services.timePeriods.find({
+		userId: locals.user.id,
+		type: 'daily',
+		day: dateStr
 	});
 
 	if (!period) {
 		return json({ metrics: null });
 	}
 
-	const metrics = await db.query.dailyMetrics.findFirst({
-		where: and(eq(dailyMetrics.timePeriodId, period.id), eq(dailyMetrics.userId, locals.user.id))
-	});
+	const metrics = await services.dailyMetrics.findByPeriod(locals.user.id, period.id);
 
 	return json({ metrics });
 };
@@ -63,35 +59,27 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 			customMetrics
 		} = body;
 
+		const services = await getDatabase();
+
 		// Find or create the time period for this date
-		let period = await db.query.timePeriods.findFirst({
-			where: and(
-				eq(timePeriods.userId, locals.user.id),
-				eq(timePeriods.periodType, 'daily'),
-				eq(timePeriods.day, dateStr)
-			)
+		let period = await services.timePeriods.find({
+			userId: locals.user.id,
+			type: 'daily',
+			day: dateStr
 		});
 
 		if (!period) {
-			// Create the period
 			const date = new Date(dateStr);
-			const periodId = uuidv4();
-			const now = new Date();
-
-			await db.insert(timePeriods).values({
-				id: periodId,
+			period = await services.timePeriods.create({
+				id: uuidv4(),
 				userId: locals.user.id,
 				periodType: 'daily',
 				year: date.getFullYear(),
 				month: date.getMonth() + 1,
 				week: null,
 				day: dateStr,
-				createdAt: now,
-				updatedAt: now
-			});
-
-			period = await db.query.timePeriods.findFirst({
-				where: eq(timePeriods.id, periodId)
+				createdAt: new Date(),
+				updatedAt: new Date()
 			});
 		}
 
@@ -100,49 +88,31 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 		}
 
 		// Check if metrics already exist
-		const existing = await db.query.dailyMetrics.findFirst({
-			where: and(
-				eq(dailyMetrics.timePeriodId, period.id),
-				eq(dailyMetrics.userId, locals.user.id)
-			)
-		});
+		const existing = await services.dailyMetrics.findByPeriod(locals.user.id, period.id);
 
 		if (existing) {
-			// Update existing metrics
-			await db
-				.update(dailyMetrics)
-				.set({
-					previousNightBedTime:
-						previousNightBedTime !== undefined
-							? previousNightBedTime
-							: existing.previousNightBedTime,
-					wakeUpTime: wakeUpTime !== undefined ? wakeUpTime : existing.wakeUpTime,
-					sleepLength: sleepLength !== undefined ? sleepLength : existing.sleepLength,
-					cardioLoad: cardioLoad !== undefined ? cardioLoad : existing.cardioLoad,
-					fitbitReadiness:
-						fitbitReadiness !== undefined ? fitbitReadiness : existing.fitbitReadiness,
-					steps: steps !== undefined ? steps : existing.steps,
-					heartPoints: heartPoints !== undefined ? heartPoints : existing.heartPoints,
-					restingHeartRate:
-						restingHeartRate !== undefined ? restingHeartRate : existing.restingHeartRate,
-					customMetrics:
-						customMetrics !== undefined
-							? JSON.stringify(customMetrics)
-							: existing.customMetrics
-				})
-				.where(eq(dailyMetrics.id, existing.id));
-
-			const updated = await db.query.dailyMetrics.findFirst({
-				where: eq(dailyMetrics.id, existing.id)
+			const updated = await services.dailyMetrics.update(existing.id, {
+				previousNightBedTime:
+					previousNightBedTime !== undefined ? previousNightBedTime : existing.previousNightBedTime,
+				wakeUpTime: wakeUpTime !== undefined ? wakeUpTime : existing.wakeUpTime,
+				sleepLength: sleepLength !== undefined ? sleepLength : existing.sleepLength,
+				cardioLoad: cardioLoad !== undefined ? cardioLoad : existing.cardioLoad,
+				fitbitReadiness:
+					fitbitReadiness !== undefined ? fitbitReadiness : existing.fitbitReadiness,
+				steps: steps !== undefined ? steps : existing.steps,
+				heartPoints: heartPoints !== undefined ? heartPoints : existing.heartPoints,
+				restingHeartRate:
+					restingHeartRate !== undefined ? restingHeartRate : existing.restingHeartRate,
+				customMetrics:
+					customMetrics !== undefined
+						? JSON.stringify(customMetrics)
+						: existing.customMetrics
 			});
 
 			return json({ metrics: updated });
 		} else {
-			// Create new metrics
-			const metricsId = uuidv4();
-
-			await db.insert(dailyMetrics).values({
-				id: metricsId,
+			const metrics = await services.dailyMetrics.create({
+				id: uuidv4(),
 				userId: locals.user.id,
 				timePeriodId: period.id,
 				previousNightBedTime: previousNightBedTime || null,
@@ -154,10 +124,6 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 				heartPoints: heartPoints || null,
 				restingHeartRate: restingHeartRate || null,
 				customMetrics: customMetrics ? JSON.stringify(customMetrics) : null
-			});
-
-			const metrics = await db.query.dailyMetrics.findFirst({
-				where: eq(dailyMetrics.id, metricsId)
 			});
 
 			return json({ metrics }, { status: 201 });

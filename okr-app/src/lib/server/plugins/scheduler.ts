@@ -3,9 +3,7 @@
  * Automatically syncs data from connected plugins at regular intervals
  */
 
-import { db } from '$lib/db/client';
-import { plugins } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { getPlugin, syncPluginData } from './manager';
 
 // Default sync interval: 1 hour
@@ -13,23 +11,41 @@ const DEFAULT_SYNC_INTERVAL_MS = 60 * 60 * 1000;
 
 // Track if scheduler is running
 let schedulerInterval: ReturnType<typeof setInterval> | null = null;
+// Track the initial (one-shot) sync timeout so stop/restart never leaves a
+// stale timer that would fire a duplicate sync on a later start (T030).
+let schedulerTimeout: ReturnType<typeof setTimeout> | null = null;
 let isRunning = false;
 
 /**
- * Start the plugin sync scheduler
+ * Start the plugin sync scheduler.
+ *
+ * Both the initial one-shot sync and the recurring interval are tracked and
+ * cleared by `stopScheduler`, so shutdown/recovery never leaks a duplicate
+ * timer. `initialDelayMs` defaults to 5000ms (let the server fully start);
+ * tests may pass a small value to drive the scheduled callback deterministically.
  */
-export function startScheduler(intervalMs: number = DEFAULT_SYNC_INTERVAL_MS): void {
+export function startScheduler(
+	intervalMs: number = DEFAULT_SYNC_INTERVAL_MS,
+	initialDelayMs: number = 5000
+): void {
 	if (schedulerInterval) {
 		console.log('Scheduler already running');
 		return;
 	}
 
+	// A prior stop may have raced; never leave a stale one-shot pending.
+	if (schedulerTimeout) {
+		clearTimeout(schedulerTimeout);
+		schedulerTimeout = null;
+	}
+
 	console.log(`Starting plugin sync scheduler (interval: ${intervalMs / 1000}s)`);
 
 	// Run initial sync after a short delay to let the server fully start
-	setTimeout(() => {
+	schedulerTimeout = setTimeout(() => {
+		schedulerTimeout = null;
 		runScheduledSync().catch(console.error);
-	}, 5000);
+	}, initialDelayMs);
 
 	// Set up recurring sync
 	schedulerInterval = setInterval(() => {
@@ -38,9 +54,14 @@ export function startScheduler(intervalMs: number = DEFAULT_SYNC_INTERVAL_MS): v
 }
 
 /**
- * Stop the scheduler
+ * Stop the scheduler: clear both the recurring interval and the pending
+ * one-shot initial sync so no duplicate timer survives a later restart.
  */
 export function stopScheduler(): void {
+	if (schedulerTimeout) {
+		clearTimeout(schedulerTimeout);
+		schedulerTimeout = null;
+	}
 	if (schedulerInterval) {
 		clearInterval(schedulerInterval);
 		schedulerInterval = null;
@@ -62,9 +83,8 @@ async function runScheduledSync(): Promise<void> {
 
 	try {
 		// Get all enabled plugin configurations
-		const enabledPlugins = await db.query.plugins.findMany({
-			where: eq(plugins.enabled, true)
-		});
+		const services = await getDatabase();
+		const enabledPlugins = await services.plugins.listEnabled();
 
 		if (enabledPlugins.length === 0) {
 			console.log('No enabled plugins to sync');

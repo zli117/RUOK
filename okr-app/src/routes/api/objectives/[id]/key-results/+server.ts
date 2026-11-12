@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { objectives, keyResults } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
 import { broadcastDataChange } from '$lib/server/events';
 
@@ -12,19 +10,16 @@ export const GET: RequestHandler = async ({ locals, params }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	// Verify objective belongs to user
-	const objective = await db.query.objectives.findFirst({
-		where: and(eq(objectives.id, params.id), eq(objectives.userId, locals.user.id))
-	});
+	const db = await getDatabase();
 
-	if (!objective) {
+	// Verify objective belongs to user
+	const objective = await db.objectives.findById(params.id);
+
+	if (!objective || objective.userId !== locals.user.id) {
 		return json({ error: 'Objective not found' }, { status: 404 });
 	}
 
-	const krs = await db.query.keyResults.findMany({
-		where: eq(keyResults.objectiveId, params.id),
-		orderBy: (kr, { asc }) => [asc(kr.sortOrder)]
-	});
+	const krs = await db.keyResults.listByObjective(params.id);
 
 	return json({ keyResults: krs });
 };
@@ -35,12 +30,12 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	// Verify objective belongs to user
-	const objective = await db.query.objectives.findFirst({
-		where: and(eq(objectives.id, params.id), eq(objectives.userId, locals.user.id))
-	});
+	const db = await getDatabase();
 
-	if (!objective) {
+	// Verify objective belongs to user
+	const objective = await db.objectives.findById(params.id);
+
+	if (!objective || objective.userId !== locals.user.id) {
 		return json({ error: 'Objective not found' }, { status: 404 });
 	}
 
@@ -66,15 +61,13 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 		}
 
 		// Get the current max sort order
-		const existing = await db.query.keyResults.findMany({
-			where: eq(keyResults.objectiveId, params.id)
-		});
+		const existing = await db.keyResults.listByObjective(params.id);
 		const maxSortOrder = existing.reduce((max, kr) => Math.max(max, kr.sortOrder), -1);
 
 		const id = uuidv4();
 		const now = new Date();
 
-		await db.insert(keyResults).values({
+		const keyResult = await db.keyResults.create({
 			id,
 			objectiveId: params.id,
 			title,
@@ -91,10 +84,6 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 			widgetQueryCode: widgetQueryCode || null,
 			createdAt: now,
 			updatedAt: now
-		});
-
-		const keyResult = await db.query.keyResults.findFirst({
-			where: eq(keyResults.id, id)
 		});
 
 		// Broadcast change to other connected clients

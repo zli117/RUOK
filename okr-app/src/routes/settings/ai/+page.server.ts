@@ -1,8 +1,6 @@
 import { redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
-import { db } from '$lib/db/client';
-import { userAiConfig } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { PROVIDER_DEFAULTS } from '$lib/server/ai/providers';
 import { getDefaultPrompt, CONTEXT_ADDENDA } from '$lib/server/ai/system-prompt';
 
@@ -16,9 +14,8 @@ export const load: PageServerLoad = async ({ locals }) => {
 		throw redirect(302, '/login');
 	}
 
-	const config = await db.query.userAiConfig.findFirst({
-		where: eq(userAiConfig.userId, locals.user.id)
-	});
+	const services = await getDatabase();
+	const config = await services.userAiConfig.findByUser(locals.user.id);
 
 	// Mask API keys and normalize models for client-side display
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any

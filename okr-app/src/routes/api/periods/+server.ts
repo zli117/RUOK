@@ -1,9 +1,8 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { timePeriods, tasks, dailyMetrics } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
+import type { PeriodType } from '$lib/db/models';
 
 // GET /api/periods - List time periods
 export const GET: RequestHandler = async ({ locals, url }) => {
@@ -11,21 +10,17 @@ export const GET: RequestHandler = async ({ locals, url }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const periodType = url.searchParams.get('type');
+	const periodType = url.searchParams.get('type') as PeriodType | null;
 	const year = url.searchParams.get('year');
 	const month = url.searchParams.get('month');
 	const week = url.searchParams.get('week');
 
-	const periods = await db.query.timePeriods.findMany({
-		where: (period, { eq, and }) => {
-			const conditions = [eq(period.userId, locals.user!.id)];
-			if (periodType) conditions.push(eq(period.periodType, periodType as any));
-			if (year) conditions.push(eq(period.year, parseInt(year)));
-			if (month) conditions.push(eq(period.month, parseInt(month)));
-			if (week) conditions.push(eq(period.week, parseInt(week)));
-			return and(...conditions);
-		},
-		orderBy: (period, { desc }) => [desc(period.year), desc(period.month), desc(period.week)]
+	const services = await getDatabase();
+	const periods = await services.timePeriods.listByUser(locals.user.id, {
+		type: periodType ?? undefined,
+		year: year ? parseInt(year) : undefined,
+		month: month ? parseInt(month) : undefined,
+		week: week ? parseInt(week) : undefined
 	});
 
 	return json({ periods });
@@ -63,20 +58,17 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 			return json({ error: 'Day (ISO date) is required for daily periods' }, { status: 400 });
 		}
 
-		// Check if period already exists
-		const existing = await db.query.timePeriods.findFirst({
-			where: and(
-				eq(timePeriods.userId, locals.user.id),
-				eq(timePeriods.periodType, periodType),
-				eq(timePeriods.year, year),
-				periodType === 'monthly' || periodType === 'weekly' || periodType === 'daily'
-					? eq(timePeriods.month, month ?? null)
-					: undefined,
-				periodType === 'weekly' || periodType === 'daily'
-					? eq(timePeriods.week, week ?? null)
-					: undefined,
-				periodType === 'daily' ? eq(timePeriods.day, day) : undefined
-			)
+		const services = await getDatabase();
+
+		// Check if period already exists (using the typed lookup, preserving
+		// backend-independent null/absent filtering).
+		const existing = await services.timePeriods.find({
+			userId: locals.user.id,
+			type: periodType,
+			year,
+			month: periodType === 'yearly' ? undefined : (month ?? null),
+			week: periodType === 'weekly' ? week : periodType === 'daily' ? null : undefined,
+			day: periodType === 'daily' ? day : undefined
 		});
 
 		if (existing) {
@@ -87,7 +79,7 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		const id = uuidv4();
 		const now = new Date();
 
-		await db.insert(timePeriods).values({
+		const period = await services.timePeriods.create({
 			id,
 			userId: locals.user.id,
 			periodType,
@@ -97,10 +89,6 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 			day: periodType === 'daily' ? day : null,
 			createdAt: now,
 			updatedAt: now
-		});
-
-		const period = await db.query.timePeriods.findFirst({
-			where: eq(timePeriods.id, id)
 		});
 
 		return json({ period, created: true }, { status: 201 });

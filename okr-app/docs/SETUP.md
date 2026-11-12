@@ -1,6 +1,6 @@
 # Setup Guide
 
-RUOK is designed to run on a Raspberry Pi (or any Linux machine) behind a Caddy reverse proxy, with each service in its own Docker Compose and a shared Docker network.
+RUOK is designed to run on a Raspberry Pi (or any Linux machine) behind a Caddy reverse proxy, with each service in its own Docker Compose and a shared Docker network. RUOK runs on **SQLite by default** and can optionally run on **PostgreSQL**; this guide covers the default SQLite installation. See [DATABASES.md](DATABASES.md) for the full both-modes configuration reference, migrations and backup/recovery.
 
 ## Quick Start (Development)
 
@@ -9,7 +9,7 @@ cd okr-app
 export ADMIN_USERNAME=admin
 export DATA_DIR=data
 npm install
-npm run db:push
+npm run db:migrate
 npm run dev
 ```
 
@@ -169,9 +169,11 @@ Configuration is set via a `.env` file (gitignored). Copy `.env.example` to `.en
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DATA_DIR` | `./data` | Host path where the SQLite database is stored |
+| `DATABASE_TYPE` | `sqlite` | `sqlite` (default) or `postgres`; selects the backend |
+| `DATABASE_URL` | *(none)* | Required when `DATABASE_TYPE=postgres` |
 | `ADMIN_USERNAME` | *(none)* | Username that gets admin privileges on login |
 
-These are referenced by `docker-compose.yml` via variable substitution. Plugin credentials (Fitbit client ID/secret, base URL) are configured through the admin UI at `/admin` — no environment variables needed.
+These are referenced by `docker-compose.yml` via variable substitution. Plugin credentials (Fitbit client ID/secret, base URL) are configured through the admin UI at `/admin` — no environment variables needed. The full database configuration reference (both modes, migrations, backup/recovery) is in [DATABASES.md](DATABASES.md).
 
 ## Admin
 
@@ -183,16 +185,15 @@ The admin dashboard at `/admin` gives you:
 
 ## Database
 
-All data lives in a single SQLite file at `$DATA_DIR/okr.db` on the host (the path you set in `.env`).
+In SQLite mode all data lives in a single SQLite file at `$DATA_DIR/okr.db` on the host (the path you set in `.env`). To run against PostgreSQL instead, set `DATABASE_TYPE=postgres` and `DATABASE_URL` (see [DATABASES.md](DATABASES.md)).
 
-**Backup:**
+**Native backup (safe, online):** copy the database with SQLite's online backup so the copy is consistent even while the app is running. Do **not** copy the live file with `cp` while writers are active:
 
 ```bash
-# Copy directly from your DATA_DIR
-cp $DATA_DIR/okr.db ~/backups/ruok-$(date +%F).db
+sqlite3 "$DATA_DIR/okr.db" ".backup ~/backups/ruok-$(date +%F).db"
 ```
 
-Or use the in-app backup: Settings > Download Backup (exports as JSON).
+Or use the in-app backup: Settings > Download Backup (exports as JSON, portable across backends — see [DATABASES.md](DATABASES.md)).
 
 **Reset:**
 

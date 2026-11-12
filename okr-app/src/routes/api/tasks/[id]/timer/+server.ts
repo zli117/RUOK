@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { tasks } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { broadcastDataChange } from '$lib/server/events';
 
 // POST /api/tasks/[id]/timer - Start or stop timer
@@ -11,11 +9,9 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const existing = await db.query.tasks.findFirst({
-		where: and(eq(tasks.id, params.id), eq(tasks.userId, locals.user.id))
-	});
-
-	if (!existing) {
+	const services = await getDatabase();
+	const existing = await services.tasks.findById(params.id);
+	if (!existing || existing.userId !== locals.user.id) {
 		return json({ error: 'Task not found' }, { status: 404 });
 	}
 
@@ -29,44 +25,20 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 
 		const now = new Date();
 
+		// Atomic timer mutations (T018): no read-modify-write lost update.
+		let task;
 		if (action === 'start') {
-			// Start timer - set timerStartedAt
 			if (existing.timerStartedAt) {
 				return json({ error: 'Timer is already running' }, { status: 400 });
 			}
-
-			await db
-				.update(tasks)
-				.set({
-					timerStartedAt: now,
-					updatedAt: now
-				})
-				.where(eq(tasks.id, params.id));
+			task = await services.tasks.startTimer(params.id, now);
 		} else {
-			// Stop timer - calculate elapsed time and add to timeSpentMs
 			if (!existing.timerStartedAt) {
 				return json({ error: 'Timer is not running' }, { status: 400 });
 			}
-
-			const elapsedMs = now.getTime() - existing.timerStartedAt.getTime();
-			const newTimeSpentMs = (existing.timeSpentMs || 0) + elapsedMs;
-
-			await db
-				.update(tasks)
-				.set({
-					timeSpentMs: newTimeSpentMs,
-					timerStartedAt: null,
-					updatedAt: now
-				})
-				.where(eq(tasks.id, params.id));
+			task = await services.tasks.stopTimer(params.id, now);
 		}
 
-		// Return updated task
-		const task = await db.query.tasks.findFirst({
-			where: eq(tasks.id, params.id)
-		});
-
-		// Broadcast change to other connected clients
 		broadcastDataChange(locals.user.id, 'data:tasks', 'data:weekly');
 
 		return json({ task });

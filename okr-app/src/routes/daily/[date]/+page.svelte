@@ -3,7 +3,7 @@
 	import TaskList from '$lib/components/TaskList.svelte';
 	import TaskForm from '$lib/components/TaskForm.svelte';
 	import type { Task, Tag } from '$lib/types';
-	import type { MetricDefinition } from '$lib/db/schema';
+	import type { MetricDefinition } from '$lib/db/models';
 
 	let { data } = $props();
 

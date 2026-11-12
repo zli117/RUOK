@@ -1,9 +1,8 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { objectives } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { broadcastDataChange } from '$lib/server/events';
+import type { ObjectivePatch } from '$lib/db/models';
 
 // GET /api/objectives/[id] - Get a single objective
 export const GET: RequestHandler = async ({ locals, params }) => {
@@ -11,11 +10,10 @@ export const GET: RequestHandler = async ({ locals, params }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const objective = await db.query.objectives.findFirst({
-		where: and(eq(objectives.id, params.id), eq(objectives.userId, locals.user.id))
-	});
+	const db = await getDatabase();
+	const objective = await db.objectives.findById(params.id);
 
-	if (!objective) {
+	if (!objective || objective.userId !== locals.user.id) {
 		return json({ error: 'Objective not found' }, { status: 404 });
 	}
 
@@ -28,12 +26,12 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	// Check if objective exists and belongs to user
-	const existing = await db.query.objectives.findFirst({
-		where: and(eq(objectives.id, params.id), eq(objectives.userId, locals.user.id))
-	});
+	const db = await getDatabase();
 
-	if (!existing) {
+	// Check if objective exists and belongs to user
+	const existing = await db.objectives.findById(params.id);
+
+	if (!existing || existing.userId !== locals.user.id) {
 		return json({ error: 'Objective not found' }, { status: 404 });
 	}
 
@@ -41,7 +39,7 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 		const body = await request.json();
 		const { title, description, weight, parentId, category, colorIndex } = body;
 
-		const updates: Partial<typeof existing> = {
+		const updates: ObjectivePatch = {
 			updatedAt: new Date()
 		};
 
@@ -52,14 +50,9 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 		if (category !== undefined) updates.category = category;
 		if (colorIndex !== undefined) updates.colorIndex = colorIndex;
 
-		await db
-			.update(objectives)
-			.set(updates)
-			.where(and(eq(objectives.id, params.id), eq(objectives.userId, locals.user.id)));
+		await db.objectives.update(params.id, updates);
 
-		const updated = await db.query.objectives.findFirst({
-			where: eq(objectives.id, params.id)
-		});
+		const updated = await db.objectives.findById(params.id);
 
 		// Broadcast change to other connected clients
 		broadcastDataChange(locals.user.id, 'data:objectives');
@@ -77,18 +70,16 @@ export const DELETE: RequestHandler = async ({ locals, params }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	// Check if objective exists and belongs to user
-	const existing = await db.query.objectives.findFirst({
-		where: and(eq(objectives.id, params.id), eq(objectives.userId, locals.user.id))
-	});
+	const db = await getDatabase();
 
-	if (!existing) {
+	// Check if objective exists and belongs to user
+	const existing = await db.objectives.findById(params.id);
+
+	if (!existing || existing.userId !== locals.user.id) {
 		return json({ error: 'Objective not found' }, { status: 404 });
 	}
 
-	await db
-		.delete(objectives)
-		.where(and(eq(objectives.id, params.id), eq(objectives.userId, locals.user.id)));
+	await db.objectives.remove(params.id);
 
 	// Broadcast change to other connected clients
 	broadcastDataChange(locals.user.id, 'data:objectives');

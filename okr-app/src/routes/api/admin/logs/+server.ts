@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { queryExecutionLogs, users } from '$lib/db/schema';
-import { desc, eq, and, gte, lte } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 
 // GET /api/admin/logs - Get query execution logs with pagination and filters
 export const GET: RequestHandler = async ({ locals, url }) => {
@@ -15,6 +13,7 @@ export const GET: RequestHandler = async ({ locals, url }) => {
 	}
 
 	try {
+		const services = await getDatabase();
 		// Pagination
 		const page = parseInt(url.searchParams.get('page') || '1');
 		const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 100);
@@ -26,41 +25,27 @@ export const GET: RequestHandler = async ({ locals, url }) => {
 		const fromDate = url.searchParams.get('from');
 		const toDate = url.searchParams.get('to');
 
-		// Build conditions
-		const conditions = [];
+		const filters: {
+			userId?: string;
+			success?: boolean;
+			from?: Date;
+			to?: Date;
+		} = {};
 
-		if (userIdFilter) {
-			conditions.push(eq(queryExecutionLogs.userId, userIdFilter));
-		}
-
+		if (userIdFilter) filters.userId = userIdFilter;
 		if (successFilter !== null && successFilter !== '') {
-			conditions.push(eq(queryExecutionLogs.success, successFilter === 'true'));
+			filters.success = successFilter === 'true';
 		}
-
-		if (fromDate) {
-			conditions.push(gte(queryExecutionLogs.createdAt, new Date(fromDate)));
-		}
-
-		if (toDate) {
-			conditions.push(lte(queryExecutionLogs.createdAt, new Date(toDate)));
-		}
+		if (fromDate) filters.from = new Date(fromDate);
+		if (toDate) filters.to = new Date(toDate);
 
 		// Fetch logs
-		const logs = await db.query.queryExecutionLogs.findMany({
-			where: conditions.length > 0 ? and(...conditions) : undefined,
-			orderBy: [desc(queryExecutionLogs.createdAt)],
-			limit,
-			offset
-		});
+		const logs = await services.queryExecutionLogs.list(filters, { limit, offset });
 
 		// Get usernames for logs
 		const userIds = [...new Set(logs.map((log) => log.userId))];
 		const usersData = await Promise.all(
-			userIds.map((id) =>
-				db.query.users.findFirst({
-					where: eq(users.id, id)
-				})
-			)
+			userIds.map((id) => services.users.findById(id))
 		);
 
 		const usernameMap = new Map(
@@ -80,10 +65,7 @@ export const GET: RequestHandler = async ({ locals, url }) => {
 		}));
 
 		// Get total count for pagination
-		const allLogs = await db.query.queryExecutionLogs.findMany({
-			where: conditions.length > 0 ? and(...conditions) : undefined
-		});
-		const totalCount = allLogs.length;
+		const totalCount = await services.queryExecutionLogs.count(filters);
 
 		return json({
 			logs: enrichedLogs,

@@ -1,17 +1,48 @@
+# RUOK — SQLite mode (WP09 / T035).
+#
+# Runs the same production image in SQLite mode: a persistent named/`DATA_DIR`
+# volume holds the SQLite database at /app/data/okr.db (default DATABASE_PATH).
+# The container runs as non-root (uid 1001). This file is STANDALONE — it does
+# NOT require a pre-existing network, so `docker compose up -d` works on a clean
+# machine for local dev/smoke.
+#
+# Reverse-proxy / shared-network deployments (optional, no extra file needed):
+# the default `ports` mapping above already publishes on the host. To instead
+# attach the container to an EXISTING external Docker network (for example a
+# corporate reverse-proxy network named `proxy`), create that network first
+# (`docker network create proxy`) and either:
+#   - run:  docker network connect proxy ruok     (after `docker compose up -d`)
+#   - or write your own small override file that adds `networks: [default, proxy]`
+#     with `networks: { proxy: { external: true } }` and apply it with
+#     `docker compose -f docker-compose.yml -f <override>.yml up -d`.
+# No network other than the standalone `default` is required here.
+
 services:
   ruok:
     build: .
+    image: ruok:local
     container_name: ruok
     restart: unless-stopped
+    # Non-root user matches the uid built into the image.
+    user: "1001:1001"
     volumes:
-      - ${DATA_DIR:-./data}:/app/data
+      # SQLite persistence: a named volume by default, or a host path via DATA_DIR.
+      - ${DATA_DIR:-ruok_data}:/app/data
     environment:
       - NODE_ENV=production
+      - DATABASE_TYPE=sqlite
       - DATABASE_PATH=/app/data/okr.db
+      - PORT=${PORT:-3000}
+      - HOST=0.0.0.0
       - ADMIN_USERNAME=${ADMIN_USERNAME:-}
+    ports:
+      - "${PORT:-3000}:3000"
+    # Standalone default network (no external dependency).
     networks:
-      - proxy
+      - default
 
-networks:
-  proxy:
-    external: true
+volumes:
+  ruok_data:
+
+# No external network is required. See the header comment for how to attach to a
+# pre-existing reverse-proxy network if you need one.

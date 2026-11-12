@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { timePeriods, tasks, taskAttributes, taskTags, dailyMetrics } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
 
 // GET /api/periods/daily/[date] - Get a specific day's data
@@ -22,13 +20,13 @@ export const GET: RequestHandler = async ({ locals, params }) => {
 	const year = date.getFullYear();
 	const month = date.getMonth() + 1;
 
+	const services = await getDatabase();
+
 	// Find or create the daily period
-	let period = await db.query.timePeriods.findFirst({
-		where: and(
-			eq(timePeriods.userId, locals.user.id),
-			eq(timePeriods.periodType, 'daily'),
-			eq(timePeriods.day, dateStr)
-		)
+	let period = await services.timePeriods.find({
+		userId: locals.user.id,
+		type: 'daily',
+		day: dateStr
 	});
 
 	let created = false;
@@ -36,7 +34,7 @@ export const GET: RequestHandler = async ({ locals, params }) => {
 		const id = uuidv4();
 		const now = new Date();
 
-		await db.insert(timePeriods).values({
+		period = await services.timePeriods.create({
 			id,
 			userId: locals.user.id,
 			periodType: 'daily',
@@ -46,10 +44,6 @@ export const GET: RequestHandler = async ({ locals, params }) => {
 			createdAt: now,
 			updatedAt: now
 		});
-
-		period = await db.query.timePeriods.findFirst({
-			where: eq(timePeriods.id, id)
-		});
 		created = true;
 	}
 
@@ -57,41 +51,28 @@ export const GET: RequestHandler = async ({ locals, params }) => {
 		return json({ error: 'Failed to get or create period' }, { status: 500 });
 	}
 
-	// Get tasks for this period
-	const periodTasks = await db.query.tasks.findMany({
-		where: eq(tasks.timePeriodId, period.id),
-		orderBy: (task, { asc }) => [asc(task.sortOrder)]
+	// Get tasks for this period (ordered) and batch their attributes + tags.
+	const periodTasks = await services.tasks.listByPeriod(period.id);
+	const taskIds = periodTasks.map((t) => t.id);
+	const [attrMap, tagMap] = await Promise.all([
+		services.taskAttributes.listByTasks(taskIds),
+		services.taskTags.listByTasks(taskIds)
+	]);
+
+	const tasksWithAttributes = periodTasks.map((task) => {
+		const attributes = (attrMap.get(task.id) ?? []).reduce(
+			(acc, attr) => {
+				acc[attr.key] = attr.value;
+				return acc;
+			},
+			{} as Record<string, string>
+		);
+		const tagIds = (tagMap.get(task.id) ?? []).map((t) => t.tagId);
+		return { ...task, attributes, tagIds };
 	});
-
-	// Get attributes for each task
-	const tasksWithAttributes = await Promise.all(
-		periodTasks.map(async (task) => {
-			const attributes = await db.query.taskAttributes.findMany({
-				where: eq(taskAttributes.taskId, task.id)
-			});
-
-			const tags = await db.query.taskTags.findMany({
-				where: eq(taskTags.taskId, task.id)
-			});
-
-			return {
-				...task,
-				attributes: attributes.reduce(
-					(acc, attr) => {
-						acc[attr.key] = attr.value;
-						return acc;
-					},
-					{} as Record<string, string>
-				),
-				tagIds: tags.map((t) => t.tagId)
-			};
-		})
-	);
 
 	// Get daily metrics
-	const metrics = await db.query.dailyMetrics.findFirst({
-		where: and(eq(dailyMetrics.timePeriodId, period.id), eq(dailyMetrics.userId, locals.user.id))
-	});
+	const metrics = await services.dailyMetrics.findByPeriod(locals.user.id, period.id);
 
 	return json({
 		period,

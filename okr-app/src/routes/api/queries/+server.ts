@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { savedQueries } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
 
 // GET /api/queries - List all saved queries
@@ -15,18 +13,14 @@ export const GET: RequestHandler = async ({ locals, url }) => {
 	const queryType = url.searchParams.get('type');
 	const validTypes = ['progress', 'widget', 'general'];
 
+	const services = await getDatabase();
 	let queries;
 	if (queryType && validTypes.includes(queryType)) {
-		queries = await db.query.savedQueries.findMany({
-			where: and(
-				eq(savedQueries.userId, locals.user.id),
-				eq(savedQueries.queryType, queryType as 'progress' | 'widget' | 'general')
-			)
+		queries = await services.savedQueries.listByUser(locals.user.id, {
+			queryType: queryType as 'progress' | 'widget' | 'general'
 		});
 	} else {
-		queries = await db.query.savedQueries.findMany({
-			where: eq(savedQueries.userId, locals.user.id)
-		});
+		queries = await services.savedQueries.listByUser(locals.user.id);
 	}
 
 	return json({ queries });
@@ -55,8 +49,9 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 
 		const id = uuidv4();
 		const now = new Date();
+		const services = await getDatabase();
 
-		await db.insert(savedQueries).values({
+		await services.savedQueries.create({
 			id,
 			userId: locals.user.id,
 			name: name.trim(),
@@ -67,9 +62,7 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 			updatedAt: now
 		});
 
-		const query = await db.query.savedQueries.findFirst({
-			where: eq(savedQueries.id, id)
-		});
+		const query = await services.savedQueries.findById(id);
 
 		return json({ query }, { status: 201 });
 	} catch (error) {

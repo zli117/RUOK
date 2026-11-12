@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { savedQueries } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { executeQuery } from '$lib/server/query/executor';
 
 // GET /api/queries/[id] - Get a single saved query
@@ -11,12 +9,8 @@ export const GET: RequestHandler = async ({ locals, params }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const query = await db.query.savedQueries.findFirst({
-		where: and(
-			eq(savedQueries.id, params.id),
-			eq(savedQueries.userId, locals.user.id)
-		)
-	});
+	const services = await getDatabase();
+	const query = await services.savedQueries.findByIdForUser(params.id, locals.user.id);
 
 	if (!query) {
 		return json({ error: 'Query not found' }, { status: 404 });
@@ -31,12 +25,8 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const existing = await db.query.savedQueries.findFirst({
-		where: and(
-			eq(savedQueries.id, params.id),
-			eq(savedQueries.userId, locals.user.id)
-		)
-	});
+	const services = await getDatabase();
+	const existing = await services.savedQueries.findByIdForUser(params.id, locals.user.id);
 
 	if (!existing) {
 		return json({ error: 'Query not found' }, { status: 404 });
@@ -46,7 +36,13 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 		const body = await request.json();
 		const { name, description, code, queryType } = body;
 
-		const updates: Record<string, unknown> = {
+		const updates: {
+			name?: string;
+			description?: string | null;
+			code?: string;
+			queryType?: 'progress' | 'widget' | 'general';
+			updatedAt?: Date;
+		} = {
 			updatedAt: new Date()
 		};
 
@@ -60,11 +56,9 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 			}
 		}
 
-		await db.update(savedQueries).set(updates).where(eq(savedQueries.id, params.id));
+		await services.savedQueries.update(params.id, updates);
 
-		const query = await db.query.savedQueries.findFirst({
-			where: eq(savedQueries.id, params.id)
-		});
+		const query = await services.savedQueries.findById(params.id);
 
 		return json({ query });
 	} catch (error) {
@@ -79,18 +73,14 @@ export const DELETE: RequestHandler = async ({ locals, params }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const existing = await db.query.savedQueries.findFirst({
-		where: and(
-			eq(savedQueries.id, params.id),
-			eq(savedQueries.userId, locals.user.id)
-		)
-	});
+	const services = await getDatabase();
+	const existing = await services.savedQueries.findByIdForUser(params.id, locals.user.id);
 
 	if (!existing) {
 		return json({ error: 'Query not found' }, { status: 404 });
 	}
 
-	await db.delete(savedQueries).where(eq(savedQueries.id, params.id));
+	await services.savedQueries.remove(params.id);
 
 	return json({ success: true });
 };
@@ -101,12 +91,8 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const query = await db.query.savedQueries.findFirst({
-		where: and(
-			eq(savedQueries.id, params.id),
-			eq(savedQueries.userId, locals.user.id)
-		)
-	});
+	const services = await getDatabase();
+	const query = await services.savedQueries.findByIdForUser(params.id, locals.user.id);
 
 	if (!query) {
 		return json({ error: 'Query not found' }, { status: 404 });

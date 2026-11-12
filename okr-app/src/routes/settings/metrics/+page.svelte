@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
-	import type { MetricDefinition } from '$lib/db/schema';
+	import type { MetricDefinition } from '$lib/db/models';
 	import CodeEditorModal from '$lib/components/CodeEditorModal.svelte';
 
 	let { data } = $props();

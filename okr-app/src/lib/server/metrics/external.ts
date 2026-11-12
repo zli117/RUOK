@@ -3,11 +3,12 @@
  *
  * First checks dailyMetricValues for previously synced data.
  * Falls back to live API calls only for missing values.
+ *
+ * Persistence goes through the typed boundary (`getDatabase()`), never a raw
+ * handle or dialect schema (FR-003).
  */
 
-import { db } from '$lib/db/client';
-import { dailyMetricValues } from '$lib/db/schema';
-import { eq, and, inArray } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
 import { getPlugin, getUserPluginConfig } from '$lib/server/plugins/manager';
 import type { MetricValues } from './evaluator';
@@ -42,19 +43,19 @@ export async function fetchExternalMetrics(
 
 	if (sourceIds.length === 0) return values;
 
-	// Check dailyMetricValues for already-synced data
-	const storedValues = await db.query.dailyMetricValues.findMany({
-		where: and(
-			eq(dailyMetricValues.userId, userId),
-			eq(dailyMetricValues.date, date),
-			inArray(dailyMetricValues.metricName, sourceIds)
-		)
-	});
+	const services = await getDatabase();
 
-	const storedMap = new Map(storedValues.map(v => [v.metricName, v.value]));
+	// Check dailyMetricValues for already-synced data
+	const storedValues = await services.dailyMetricValues.listByUserAndDateAndNames(
+		userId,
+		date,
+		sourceIds
+	);
+
+	const storedMap = new Map(storedValues.map((v) => [v.metricName, v.value]));
 
 	// Identify which source IDs still need fetching
-	const missingSourceIds = sourceIds.filter(id => !storedMap.has(id));
+	const missingSourceIds = sourceIds.filter((id) => !storedMap.has(id));
 
 	// Use stored values
 	for (const sourceId of sourceIds) {
@@ -103,14 +104,9 @@ export async function fetchExternalMetrics(
 		if (!config || !config.credentials) continue;
 
 		try {
-			const records = await plugin.fetchData(
-				config.credentials,
-				date,
-				date,
-				fields
-			);
+			const records = await plugin.fetchData(config.credentials, date, date, fields);
 
-			const record = records.find(r => r.date === date);
+			const record = records.find((r) => r.date === date);
 			if (record) {
 				for (const fieldId of fields) {
 					const sourceId = `${pluginId}.${fieldId}`;
@@ -119,27 +115,14 @@ export async function fetchExternalMetrics(
 
 					// Cache the fetched value in the DB for future requests
 					const stringValue = value === null || value === undefined ? null : String(value);
-					const existing = await db.query.dailyMetricValues.findFirst({
-						where: and(
-							eq(dailyMetricValues.userId, userId),
-							eq(dailyMetricValues.date, date),
-							eq(dailyMetricValues.metricName, sourceId)
-						)
+					await services.dailyMetricValues.upsert({
+						id: uuidv4(),
+						userId,
+						date,
+						metricName: sourceId,
+						value: stringValue,
+						source: pluginId
 					});
-					if (existing) {
-						await db.update(dailyMetricValues)
-							.set({ value: stringValue })
-							.where(eq(dailyMetricValues.id, existing.id));
-					} else {
-						await db.insert(dailyMetricValues).values({
-							id: uuidv4(),
-							userId,
-							date,
-							metricName: sourceId,
-							value: stringValue,
-							source: pluginId
-						});
-					}
 				}
 			}
 		} catch (error) {
@@ -160,6 +143,6 @@ export function getExternalSourceIds(
 	metrics: Array<{ type: string; source?: string }>
 ): string[] {
 	return metrics
-		.filter(m => m.type === 'external' && m.source)
-		.map(m => m.source!);
+		.filter((m) => m.type === 'external' && m.source)
+		.map((m) => m.source!);
 }

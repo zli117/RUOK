@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { users } from '$lib/db/schema';
-import { desc } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 
 // GET /api/admin/users - List all users (admin only)
 export const GET: RequestHandler = async ({ locals }) => {
@@ -15,9 +13,10 @@ export const GET: RequestHandler = async ({ locals }) => {
 	}
 
 	try {
-		const allUsers = await db.query.users.findMany({
-			orderBy: [desc(users.createdAt)]
-		});
+		const db = await getDatabase();
+		const allUsers = (await db.users.list()).sort(
+			(a, b) => b.createdAt.getTime() - a.createdAt.getTime()
+		);
 
 		// Don't expose password hashes
 		const safeUsers = allUsers.map((user) => ({

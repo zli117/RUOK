@@ -1,6 +1,6 @@
 import { redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
-import type { MetricDefinition } from '$lib/db/schema';
+import type { MetricDefinition } from '$lib/db/models';
 
 export const load: PageServerLoad = async ({ params, locals, fetch, depends }) => {
 	// Register dependency for invalidation

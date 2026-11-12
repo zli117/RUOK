@@ -4,9 +4,7 @@
  * "today", "the current objective" without an extra tool call.
  */
 
-import { db } from '$lib/db/client';
-import { users } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import {
 	getTodayInTimezone,
 	getCurrentYearInTimezone,
@@ -24,7 +22,8 @@ export interface PageContext {
 }
 
 export async function buildStateSnapshot(userId: string, page: PageContext): Promise<string> {
-	const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
+	const services = await getDatabase();
+	const user = await services.users.findById(userId);
 	const timezone = user?.timezone || 'UTC';
 	const weekStartDay = (user?.weekStartDay || 'monday') as WeekStartDay;
 
@@ -53,7 +52,8 @@ export async function buildStateSnapshot(userId: string, page: PageContext): Pro
 }
 
 export async function getUserToolContext(userId: string) {
-	const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
+	const services = await getDatabase();
+	const user = await services.users.findById(userId);
 	return {
 		userId,
 		timezone: user?.timezone || 'UTC',

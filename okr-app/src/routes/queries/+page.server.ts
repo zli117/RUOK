@@ -1,8 +1,6 @@
 import { redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
-import { db } from '$lib/db/client';
-import { savedQueries } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 
 export const load: PageServerLoad = async ({ locals, depends }) => {
 	// Register dependency for invalidation
@@ -12,9 +10,8 @@ export const load: PageServerLoad = async ({ locals, depends }) => {
 		throw redirect(302, '/login');
 	}
 
-	const queries = await db.query.savedQueries.findMany({
-		where: eq(savedQueries.userId, locals.user.id)
-	});
+	const services = await getDatabase();
+	const queries = await services.savedQueries.listByUser(locals.user.id);
 
 	return {
 		savedQueries: queries

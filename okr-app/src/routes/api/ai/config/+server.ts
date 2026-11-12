@@ -1,10 +1,8 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { userAiConfig } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
-import { PROVIDER_DEFAULTS, type AiProvider } from '$lib/server/ai/providers';
+import { PROVIDER_DEFAULTS, SUGGESTED_MODELS, type AiProvider } from '$lib/server/ai/providers';
 
 function maskApiKey(key: string): string {
 	if (key.length > 8) return '***' + key.slice(-4);
@@ -30,9 +28,8 @@ export const GET: RequestHandler = async ({ locals }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const config = await db.query.userAiConfig.findFirst({
-		where: eq(userAiConfig.userId, locals.user.id)
-	});
+	const services = await getDatabase();
+	const config = await services.userAiConfig.findByUser(locals.user.id);
 
 	if (!config) {
 		return json({ config: null, providerDefaults: PROVIDER_DEFAULTS });
@@ -89,10 +86,9 @@ export const PUT: RequestHandler = async ({ locals, request }) => {
 			maxAgentRounds?: number;
 		};
 
+		const services = await getDatabase();
 		// Get existing config
-		const existing = await db.query.userAiConfig.findFirst({
-			where: eq(userAiConfig.userId, locals.user.id)
-		});
+		const existing = await services.userAiConfig.findByUser(locals.user.id);
 
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		const existingProvidersConfig: Record<string, Record<string, any>> = existing?.providersConfig
@@ -148,29 +144,16 @@ export const PUT: RequestHandler = async ({ locals, request }) => {
 			rounds = Math.max(1, Math.min(200, Math.floor(maxAgentRounds)));
 		}
 
-		if (existing) {
-			await db
-				.update(userAiConfig)
-				.set({
-					provider: activeProvider,
-					providersConfig: JSON.stringify(existingProvidersConfig),
-					customSystemPrompt: systemPrompt,
-					maxAgentRounds: rounds,
-					updatedAt: new Date()
-				})
-				.where(eq(userAiConfig.id, existing.id));
-		} else {
-			await db.insert(userAiConfig).values({
-				id: uuidv4(),
-				userId: locals.user.id,
-				provider: activeProvider,
-				providersConfig: JSON.stringify(existingProvidersConfig),
-				customSystemPrompt: systemPrompt,
-				maxAgentRounds: rounds,
-				createdAt: new Date(),
-				updatedAt: new Date()
-			});
-		}
+		// Insert-or-update keyed on userId (preserves per-user AI configuration).
+		await services.userAiConfig.upsert({
+			id: existing?.id ?? uuidv4(),
+			userId: locals.user.id,
+			provider: activeProvider,
+			providersConfig: JSON.stringify(existingProvidersConfig),
+			customSystemPrompt: systemPrompt,
+			maxAgentRounds: rounds,
+			updatedAt: new Date()
+		});
 
 		return json({ success: true });
 	} catch (error) {

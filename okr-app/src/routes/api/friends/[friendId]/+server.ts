@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { friendships, friendNotes } from '$lib/db/schema';
-import { eq, and, or } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 
 // DELETE /api/friends/[friendId] - Unfriend a user
 export const DELETE: RequestHandler = async ({ locals, params }) => {
@@ -13,29 +11,20 @@ export const DELETE: RequestHandler = async ({ locals, params }) => {
 	try {
 		const friendId = params.friendId;
 		const userId = locals.user.id;
+		const services = await getDatabase();
 
 		// Find the friendship (could be in either direction)
-		const friendship = await db.query.friendships.findFirst({
-			where: or(
-				and(eq(friendships.userId1, userId), eq(friendships.userId2, friendId)),
-				and(eq(friendships.userId1, friendId), eq(friendships.userId2, userId))
-			)
-		});
+		const friendship = await services.friendships.findBetween(userId, friendId);
 
 		if (!friendship) {
 			return json({ error: 'Friendship not found' }, { status: 404 });
 		}
 
 		// Delete the friendship
-		await db.delete(friendships).where(eq(friendships.id, friendship.id));
+		await services.friendships.remove(friendship.id);
 
 		// Optionally delete the notes (from both sides)
-		await db.delete(friendNotes).where(
-			or(
-				and(eq(friendNotes.userId, userId), eq(friendNotes.friendId, friendId)),
-				and(eq(friendNotes.userId, friendId), eq(friendNotes.friendId, userId))
-			)
-		);
+		await services.friendNotes.removeBetween(userId, friendId);
 
 		return json({ success: true });
 	} catch (error) {

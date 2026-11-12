@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { goto, invalidateAll } from '$app/navigation';
-	import type { MetricDefinition } from '$lib/db/schema';
+	import type { MetricDefinition } from '$lib/db/models';
 
 	let { data } = $props();
 

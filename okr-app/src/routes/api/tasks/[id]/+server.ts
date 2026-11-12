@@ -1,9 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { tasks, taskAttributes, taskTags } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
-import { v4 as uuidv4 } from 'uuid';
+import { getDatabase } from '$lib/server/database';
 import { broadcastDataChange } from '$lib/server/events';
 
 // GET /api/tasks/[id] - Get a single task
@@ -12,21 +9,17 @@ export const GET: RequestHandler = async ({ locals, params }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const task = await db.query.tasks.findFirst({
-		where: and(eq(tasks.id, params.id), eq(tasks.userId, locals.user.id))
-	});
+	const services = await getDatabase();
+	const task = await services.tasks.findById(params.id);
 
-	if (!task) {
+	if (!task || task.userId !== locals.user.id) {
 		return json({ error: 'Task not found' }, { status: 404 });
 	}
 
-	const attributes = await db.query.taskAttributes.findMany({
-		where: eq(taskAttributes.taskId, task.id)
-	});
-
-	const tags = await db.query.taskTags.findMany({
-		where: eq(taskTags.taskId, task.id)
-	});
+	const [attributes, tags] = await Promise.all([
+		services.taskAttributes.listByTask(task.id),
+		services.taskTags.listByTask(task.id)
+	]);
 
 	return json({
 		task: {
@@ -49,11 +42,9 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const existing = await db.query.tasks.findFirst({
-		where: and(eq(tasks.id, params.id), eq(tasks.userId, locals.user.id))
-	});
-
-	if (!existing) {
+	const services = await getDatabase();
+	const existing = await services.tasks.findById(params.id);
+	if (!existing || existing.userId !== locals.user.id) {
 		return json({ error: 'Task not found' }, { status: 404 });
 	}
 
@@ -61,66 +52,34 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 		const body = await request.json();
 		const { title, completed, sortOrder, attributes, tagIds } = body;
 
-		const updates: Record<string, unknown> = {
+		const patch: Record<string, unknown> = {
 			updatedAt: new Date()
 		};
 
-		if (title !== undefined) updates.title = title;
+		if (title !== undefined) patch.title = title;
 		if (completed !== undefined) {
-			updates.completed = completed;
-			updates.completedAt = completed ? new Date() : null;
+			patch.completed = completed;
+			patch.completedAt = completed ? new Date() : null;
 		}
-		if (sortOrder !== undefined) updates.sortOrder = sortOrder;
+		if (sortOrder !== undefined) patch.sortOrder = sortOrder;
 
-		await db.update(tasks).set(updates).where(eq(tasks.id, params.id));
-
-		// Update attributes if provided
-		if (attributes && typeof attributes === 'object') {
-			// Delete existing attributes
-			await db.delete(taskAttributes).where(eq(taskAttributes.taskId, params.id));
-
-			// Insert new attributes
-			for (const [key, value] of Object.entries(attributes)) {
-				if (value !== null && value !== undefined) {
-					await db.insert(taskAttributes).values({
-						id: uuidv4(),
-						taskId: params.id,
-						key,
-						value: String(value),
-						valueType: typeof value === 'number' ? 'number' : 'text'
-					});
-				}
-			}
-		}
-
-		// Update tags if provided
-		if (tagIds !== undefined && Array.isArray(tagIds)) {
-			// Delete existing tags
-			await db.delete(taskTags).where(eq(taskTags.taskId, params.id));
-
-			// Insert new tags
-			for (const tagId of tagIds) {
-				await db.insert(taskTags).values({
-					taskId: params.id,
-					tagId
-				});
-			}
-		}
-
-		// Return updated task
-		const task = await db.query.tasks.findFirst({
-			where: eq(tasks.id, params.id)
+		// Atomic update: base fields + replace attributes + replace tags (T018).
+		const task = await services.updateTaskWithDetails({
+			id: params.id,
+			patch,
+			attributes: attributes && typeof attributes === 'object' ? attributes : undefined,
+			tagIds: tagIds !== undefined && Array.isArray(tagIds) ? tagIds : undefined
 		});
 
-		const attrs = await db.query.taskAttributes.findMany({
-			where: eq(taskAttributes.taskId, params.id)
-		});
+		if (!task) {
+			return json({ error: 'Task not found' }, { status: 404 });
+		}
 
-		const tags = await db.query.taskTags.findMany({
-			where: eq(taskTags.taskId, params.id)
-		});
+		const [attrs, tags] = await Promise.all([
+			services.taskAttributes.listByTask(task.id),
+			services.taskTags.listByTask(task.id)
+		]);
 
-		// Broadcast change to other connected clients
 		broadcastDataChange(locals.user.id, 'data:tasks', 'data:weekly');
 
 		return json({
@@ -148,11 +107,9 @@ export const PATCH: RequestHandler = async ({ locals, params }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const existing = await db.query.tasks.findFirst({
-		where: and(eq(tasks.id, params.id), eq(tasks.userId, locals.user.id))
-	});
-
-	if (!existing) {
+	const services = await getDatabase();
+	const existing = await services.tasks.findById(params.id);
+	if (!existing || existing.userId !== locals.user.id) {
 		return json({ error: 'Task not found' }, { status: 404 });
 	}
 
@@ -168,21 +125,26 @@ export const PATCH: RequestHandler = async ({ locals, params }) => {
 
 	// If completing the task and timer is running, stop it and save elapsed time
 	if (newCompleted && existing.timerStartedAt) {
-		const elapsedMs = now.getTime() - existing.timerStartedAt.getTime();
-		updates.timeSpentMs = (existing.timeSpentMs || 0) + elapsedMs;
-		updates.timerStartedAt = null;
+		const stopped = await services.tasks.stopTimer(params.id, now);
+		if (stopped) {
+			updates.timeSpentMs = stopped.timeSpentMs;
+			updates.timerStartedAt = null;
+		} else {
+			// Concurrent stop already applied the accumulated total and cleared the
+			// running state between findById and stopTimer — re-read the stopped row
+			// so we carry those values instead of returning a stale/undefined task.
+			const current = await services.tasks.findById(params.id);
+			if (current) {
+				updates.timeSpentMs = current.timeSpentMs;
+				updates.timerStartedAt = null;
+			}
+		}
 	}
 
-	await db
-		.update(tasks)
-		.set(updates)
-		.where(eq(tasks.id, params.id));
+	await services.tasks.update(params.id, updates);
 
-	const task = await db.query.tasks.findFirst({
-		where: eq(tasks.id, params.id)
-	});
+	const task = await services.tasks.findById(params.id);
 
-	// Broadcast change to other connected clients
 	broadcastDataChange(locals.user.id, 'data:tasks', 'data:weekly');
 
 	return json({ task });
@@ -194,17 +156,14 @@ export const DELETE: RequestHandler = async ({ locals, params }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const existing = await db.query.tasks.findFirst({
-		where: and(eq(tasks.id, params.id), eq(tasks.userId, locals.user.id))
-	});
-
-	if (!existing) {
+	const services = await getDatabase();
+	const existing = await services.tasks.findById(params.id);
+	if (!existing || existing.userId !== locals.user.id) {
 		return json({ error: 'Task not found' }, { status: 404 });
 	}
 
-	await db.delete(tasks).where(eq(tasks.id, params.id));
+	await services.tasks.remove(params.id);
 
-	// Broadcast change to other connected clients
 	broadcastDataChange(locals.user.id, 'data:tasks', 'data:weekly');
 
 	return json({ success: true });

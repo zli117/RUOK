@@ -1,9 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { users, sessions } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
 import { verifyPassword, hashPassword, createSession } from '$lib/server/auth';
+import { getDatabase } from '$lib/server/database';
 
 export const POST: RequestHandler = async ({ locals, request, cookies }) => {
 	if (!locals.user) {
@@ -21,10 +19,10 @@ export const POST: RequestHandler = async ({ locals, request, cookies }) => {
 			return json({ error: 'New password must be at least 8 characters' }, { status: 400 });
 		}
 
+		const db = await getDatabase();
+
 		// Get the user's current password hash
-		const user = await db.query.users.findFirst({
-			where: eq(users.id, locals.user.id)
-		});
+		const user = await db.users.findById(locals.user.id);
 
 		if (!user) {
 			return json({ error: 'User not found' }, { status: 404 });
@@ -38,10 +36,10 @@ export const POST: RequestHandler = async ({ locals, request, cookies }) => {
 
 		// Hash and save new password
 		const newHash = await hashPassword(newPassword);
-		await db.update(users).set({ passwordHash: newHash }).where(eq(users.id, locals.user.id));
+		await db.users.update(locals.user.id, { passwordHash: newHash });
 
 		// Invalidate all existing sessions and create a fresh one
-		await db.delete(sessions).where(eq(sessions.userId, locals.user.id));
+		await db.sessions.deleteByUser(locals.user.id);
 		const newSessionId = await createSession(locals.user.id);
 		cookies.set('session', newSessionId, {
 			path: '/',

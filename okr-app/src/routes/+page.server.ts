@@ -1,7 +1,5 @@
 import type { PageServerLoad } from './$types';
-import { db } from '$lib/db/client';
-import { timePeriods, tasks, taskAttributes, objectives, keyResults, dashboardWidgets, savedQueries } from '$lib/db/schema';
-import { eq, and, desc } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import {
 	getWeekNumber,
 	getWeekStartDate,
@@ -33,39 +31,29 @@ export const load: PageServerLoad = async ({ locals, depends }) => {
 	const currentWeek = getWeekNumber(today, weekStartDay);
 	const currentMonth = getCurrentMonthInTimezone(timezone);
 
-	// Get today's tasks
-	const todayPeriod = await db.query.timePeriods.findFirst({
-		where: and(
-			eq(timePeriods.userId, locals.user.id),
-			eq(timePeriods.periodType, 'daily'),
-			eq(timePeriods.day, todayStr)
-		)
+	const services = await getDatabase();
+
+	// Get today's tasks (period + batched attributes)
+	const todayPeriod = await services.timePeriods.find({
+		userId: locals.user.id,
+		type: 'daily',
+		day: todayStr
 	});
 
 	let todayTasks: any[] = [];
 	if (todayPeriod) {
-		const periodTasks = await db.query.tasks.findMany({
-			where: eq(tasks.timePeriodId, todayPeriod.id),
-			orderBy: (task, { asc }) => [asc(task.sortOrder)]
-		});
-
-		todayTasks = await Promise.all(
-			periodTasks.map(async (task) => {
-				const attributes = await db.query.taskAttributes.findMany({
-					where: eq(taskAttributes.taskId, task.id)
-				});
-				return {
-					...task,
-					attributes: attributes.reduce(
-						(acc, attr) => {
-							acc[attr.key] = attr.value;
-							return acc;
-						},
-						{} as Record<string, string>
-					)
-				};
-			})
-		);
+		const periodTasks = await services.tasks.listByPeriod(todayPeriod.id);
+		const attrMap = await services.taskAttributes.listByTasks(periodTasks.map((t) => t.id));
+		todayTasks = periodTasks.map((task) => ({
+			...task,
+			attributes: (attrMap.get(task.id) ?? []).reduce(
+				(acc, attr) => {
+					acc[attr.key] = attr.value;
+					return acc;
+				},
+				{} as Record<string, string>
+			)
+		}));
 	}
 
 	// Get this week's tasks stats
@@ -77,37 +65,28 @@ export const load: PageServerLoad = async ({ locals, depends }) => {
 		const date = addDays(weekStart, i);
 		const dateStr = formatDate(date);
 
-		const period = await db.query.timePeriods.findFirst({
-			where: and(
-				eq(timePeriods.userId, locals.user.id),
-				eq(timePeriods.periodType, 'daily'),
-				eq(timePeriods.day, dateStr)
-			)
+		const period = await services.timePeriods.find({
+			userId: locals.user.id,
+			type: 'daily',
+			day: dateStr
 		});
 
 		if (period) {
-			const dayTasks = await db.query.tasks.findMany({
-				where: eq(tasks.timePeriodId, period.id)
-			});
+			const dayTasks = await services.tasks.listByPeriod(period.id);
 			weekTotalTasks += dayTasks.length;
 			weekCompletedTasks += dayTasks.filter((t) => t.completed).length;
 		}
 	}
 
-	// Get yearly objectives with key results
-	const yearlyObjectives = await db.query.objectives.findMany({
-		where: and(
-			eq(objectives.userId, locals.user.id),
-			eq(objectives.level, 'yearly'),
-			eq(objectives.year, currentYear)
-		)
-	});
+	// Get yearly objectives with key results (owned, via boundary)
+	const allObjectives = await services.objectives.listByUser(locals.user.id);
+	const yearlyObjectives = allObjectives.filter(
+		(o) => o.level === 'yearly' && o.year === currentYear
+	);
 
 	const yearlyObjectivesWithKRs = await Promise.all(
 		yearlyObjectives.map(async (obj) => {
-			const krs = await db.query.keyResults.findMany({
-				where: eq(keyResults.objectiveId, obj.id)
-			});
+			const krs = await services.keyResults.listByObjective(obj.id);
 			const avgScore =
 				krs.length > 0 ? krs.reduce((sum, kr) => sum + kr.score * kr.weight, 0) / krs.reduce((sum, kr) => sum + kr.weight, 0) : 0;
 			return {
@@ -119,20 +98,13 @@ export const load: PageServerLoad = async ({ locals, depends }) => {
 	);
 
 	// Get monthly objectives with key results for current month
-	const monthlyObjectives = await db.query.objectives.findMany({
-		where: and(
-			eq(objectives.userId, locals.user.id),
-			eq(objectives.level, 'monthly'),
-			eq(objectives.year, currentYear),
-			eq(objectives.month, currentMonth)
-		)
-	});
+	const monthlyObjectives = allObjectives.filter(
+		(o) => o.level === 'monthly' && o.year === currentYear && o.month === currentMonth
+	);
 
 	const monthlyObjectivesWithKRs = await Promise.all(
 		monthlyObjectives.map(async (obj) => {
-			const krs = await db.query.keyResults.findMany({
-				where: eq(keyResults.objectiveId, obj.id)
-			});
+			const krs = await services.keyResults.listByObjective(obj.id);
 			const avgScore =
 				krs.length > 0 ? krs.reduce((sum, kr) => sum + kr.score * kr.weight, 0) / krs.reduce((sum, kr) => sum + kr.weight, 0) : 0;
 			return {
@@ -144,18 +116,10 @@ export const load: PageServerLoad = async ({ locals, depends }) => {
 	);
 
 	// Load dashboard widgets
-	const widgets = await db.query.dashboardWidgets.findMany({
-		where: and(
-			eq(dashboardWidgets.userId, locals.user.id),
-			eq(dashboardWidgets.page, 'dashboard')
-		),
-		orderBy: (w, { asc }) => [asc(w.sortOrder)]
-	});
+	const widgets = await services.dashboardWidgets.listByUserAndPage(locals.user.id, 'dashboard');
 
 	// Load saved queries for widget selector
-	const queries = await db.query.savedQueries.findMany({
-		where: eq(savedQueries.userId, locals.user.id)
-	});
+	const queries = await services.savedQueries.listByUser(locals.user.id);
 
 	return {
 		user: locals.user,

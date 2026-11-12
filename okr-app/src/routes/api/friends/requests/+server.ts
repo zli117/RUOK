@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { users, friendRequests } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 
 // GET /api/friends/requests - List pending friend requests (incoming and outgoing)
 export const GET: RequestHandler = async ({ locals }) => {
@@ -11,24 +9,18 @@ export const GET: RequestHandler = async ({ locals }) => {
 	}
 
 	const userId = locals.user.id;
+	const services = await getDatabase();
 
 	// Get incoming pending requests (sent to this user)
-	const incomingRequests = await db.query.friendRequests.findMany({
-		where: and(eq(friendRequests.toUserId, userId), eq(friendRequests.status, 'pending'))
-	});
+	const incomingRequests = await services.friendRequests.listIncomingPending(userId);
 
 	// Get outgoing pending requests (sent by this user)
-	const outgoingRequests = await db.query.friendRequests.findMany({
-		where: and(eq(friendRequests.fromUserId, userId), eq(friendRequests.status, 'pending'))
-	});
+	const outgoingRequests = await services.friendRequests.listOutgoingPending(userId);
 
 	// Enrich incoming requests with sender username
 	const incoming = await Promise.all(
 		incomingRequests.map(async (req) => {
-			const fromUser = await db.query.users.findFirst({
-				where: eq(users.id, req.fromUserId),
-				columns: { id: true, username: true }
-			});
+			const fromUser = await services.users.findById(req.fromUserId);
 			return {
 				id: req.id,
 				fromUserId: req.fromUserId,
@@ -41,10 +33,7 @@ export const GET: RequestHandler = async ({ locals }) => {
 	// Enrich outgoing requests with recipient username
 	const outgoing = await Promise.all(
 		outgoingRequests.map(async (req) => {
-			const toUser = await db.query.users.findFirst({
-				where: eq(users.id, req.toUserId),
-				columns: { id: true, username: true }
-			});
+			const toUser = await services.users.findById(req.toUserId);
 			return {
 				id: req.id,
 				toUserId: req.toUserId,

@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { tags } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
 
 // GET /api/tags - List all tags for the current user
@@ -11,10 +9,8 @@ export const GET: RequestHandler = async ({ locals }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const userTags = await db.query.tags.findMany({
-		where: eq(tags.userId, locals.user.id),
-		orderBy: (tag, { asc }) => [asc(tag.category), asc(tag.name)]
-	});
+	const services = await getDatabase();
+	const userTags = await services.tags.listByUser(locals.user.id);
 
 	return json({ tags: userTags });
 };
@@ -33,28 +29,20 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 			return json({ error: 'Name is required' }, { status: 400 });
 		}
 
-		// Check if tag already exists
-		const existing = await db.query.tags.findFirst({
-			where: (tag, { eq, and }) =>
-				and(eq(tag.userId, locals.user!.id), eq(tag.name, name.trim()))
-		});
+		const services = await getDatabase();
 
+		// Check if tag already exists (owner scope preserved)
+		const existing = await services.tags.findByUserAndName(locals.user.id, name.trim());
 		if (existing) {
 			return json({ error: 'Tag already exists' }, { status: 409 });
 		}
 
-		const id = uuidv4();
-
-		await db.insert(tags).values({
-			id,
+		const tag = await services.tags.create({
+			id: uuidv4(),
 			userId: locals.user.id,
 			name: name.trim(),
 			color: color || null,
 			category: category || null
-		});
-
-		const tag = await db.query.tags.findFirst({
-			where: eq(tags.id, id)
 		});
 
 		return json({ tag }, { status: 201 });

@@ -3,26 +3,19 @@
  * time period (yearly/monthly/weekly/daily) for the current user.
  */
 
-import { db } from '$lib/db/client';
-import { timePeriods } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
 import { getWeekNumber, getWeekYear, type WeekStartDay } from '$lib/utils/week';
 
 export async function findOrCreateDailyPeriod(userId: string, day: string): Promise<string> {
-	const existing = await db.query.timePeriods.findFirst({
-		where: and(
-			eq(timePeriods.userId, userId),
-			eq(timePeriods.periodType, 'daily'),
-			eq(timePeriods.day, day)
-		)
-	});
+	const services = await getDatabase();
+	const existing = await services.timePeriods.find({ userId, type: 'daily', day });
 	if (existing) return existing.id;
 
 	const date = new Date(day);
 	const id = uuidv4();
 	const now = new Date();
-	await db.insert(timePeriods).values({
+	await services.timePeriods.create({
 		id,
 		userId,
 		periodType: 'daily',
@@ -41,19 +34,13 @@ export async function findOrCreateWeeklyPeriod(
 	year: number,
 	week: number
 ): Promise<string> {
-	const existing = await db.query.timePeriods.findFirst({
-		where: and(
-			eq(timePeriods.userId, userId),
-			eq(timePeriods.periodType, 'weekly'),
-			eq(timePeriods.year, year),
-			eq(timePeriods.week, week)
-		)
-	});
+	const services = await getDatabase();
+	const existing = await services.timePeriods.find({ userId, type: 'weekly', year, week });
 	if (existing) return existing.id;
 
 	const id = uuidv4();
 	const now = new Date();
-	await db.insert(timePeriods).values({
+	await services.timePeriods.create({
 		id,
 		userId,
 		periodType: 'weekly',

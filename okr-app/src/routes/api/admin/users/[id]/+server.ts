@@ -1,9 +1,20 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { users, sessions } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { hashPassword } from '$lib/server/auth';
+import type { UserRow } from '$lib/db/models';
+
+function serializeUser(user: UserRow) {
+	return {
+		id: user.id,
+		username: user.username,
+		isAdmin: user.isAdmin || false,
+		isDisabled: user.isDisabled || false,
+		weekStartDay: user.weekStartDay,
+		timezone: user.timezone,
+		createdAt: user.createdAt
+	};
+}
 
 // PATCH /api/admin/users/[id] - Update user (disable/enable, toggle admin)
 export const PATCH: RequestHandler = async ({ locals, params, request }) => {
@@ -26,9 +37,8 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 		const body = await request.json();
 		const { isDisabled, isAdmin, resetPassword } = body;
 
-		const user = await db.query.users.findFirst({
-			where: eq(users.id, userId)
-		});
+		const db = await getDatabase();
+		const user = await db.users.findById(userId);
 
 		if (!user) {
 			return json({ error: 'User not found' }, { status: 404 });
@@ -37,25 +47,15 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 		// Handle password reset
 		if (resetPassword) {
 			const passwordHash = await hashPassword('default1234');
-			await db.update(users).set({ passwordHash }).where(eq(users.id, userId));
+			await db.users.update(userId, { passwordHash });
 
 			// Invalidate all their sessions so they must log in with the new password
-			await db.delete(sessions).where(eq(sessions.userId, userId));
+			await db.sessions.deleteByUser(userId);
 
-			const updatedUser = await db.query.users.findFirst({
-				where: eq(users.id, userId)
-			});
+			const updatedUser = await db.users.findById(userId);
 
 			return json({
-				user: {
-					id: updatedUser!.id,
-					username: updatedUser!.username,
-					isAdmin: updatedUser!.isAdmin || false,
-					isDisabled: updatedUser!.isDisabled || false,
-					weekStartDay: updatedUser!.weekStartDay,
-					timezone: updatedUser!.timezone,
-					createdAt: updatedUser!.createdAt
-				},
+				user: serializeUser(updatedUser!),
 				passwordReset: true
 			});
 		}
@@ -74,27 +74,17 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 			return json({ error: 'No valid updates provided' }, { status: 400 });
 		}
 
-		await db.update(users).set(updates).where(eq(users.id, userId));
+		await db.users.update(userId, updates);
 
 		// If user was disabled, invalidate all their sessions
 		if (updates.isDisabled) {
-			await db.delete(sessions).where(eq(sessions.userId, userId));
+			await db.sessions.deleteByUser(userId);
 		}
 
-		const updatedUser = await db.query.users.findFirst({
-			where: eq(users.id, userId)
-		});
+		const updatedUser = await db.users.findById(userId);
 
 		return json({
-			user: {
-				id: updatedUser!.id,
-				username: updatedUser!.username,
-				isAdmin: updatedUser!.isAdmin || false,
-				isDisabled: updatedUser!.isDisabled || false,
-				weekStartDay: updatedUser!.weekStartDay,
-				timezone: updatedUser!.timezone,
-				createdAt: updatedUser!.createdAt
-			}
+			user: serializeUser(updatedUser!)
 		});
 	} catch (error) {
 		console.error('Error updating user:', error);
@@ -120,16 +110,15 @@ export const DELETE: RequestHandler = async ({ locals, params }) => {
 	}
 
 	try {
-		const user = await db.query.users.findFirst({
-			where: eq(users.id, userId)
-		});
+		const db = await getDatabase();
+		const user = await db.users.findById(userId);
 
 		if (!user) {
 			return json({ error: 'User not found' }, { status: 404 });
 		}
 
 		// Delete user - cascades to all related data via schema constraints
-		await db.delete(users).where(eq(users.id, userId));
+		await db.users.remove(userId);
 
 		return json({ success: true, deletedUsername: user.username });
 	} catch (error) {

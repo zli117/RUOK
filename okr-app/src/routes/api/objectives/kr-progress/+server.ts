@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { keyResults, objectives } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { executeQuery } from '$lib/server/query/executor';
 
 // POST /api/objectives/kr-progress - Execute progress queries for multiple KRs
@@ -18,15 +16,14 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 			return json({ error: 'krIds must be a non-empty array' }, { status: 400 });
 		}
 
+		const db = await getDatabase();
 		const results: Record<string, { score: number | null; scoreLabel?: string; error?: string }> = {};
 
 		// Process all KRs in parallel
 		await Promise.all(
 			krIds.map(async (krId: string) => {
 				// Get the KR
-				const kr = await db.query.keyResults.findFirst({
-					where: eq(keyResults.id, krId)
-				});
+				const kr = await db.keyResults.findById(krId);
 
 				if (!kr) {
 					results[krId] = { score: null, error: 'Key result not found' };
@@ -34,14 +31,9 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 				}
 
 				// Verify the KR belongs to user's objective
-				const objective = await db.query.objectives.findFirst({
-					where: and(
-						eq(objectives.id, kr.objectiveId),
-						eq(objectives.userId, locals.user!.id)
-					)
-				});
+				const objective = await db.objectives.findById(kr.objectiveId);
 
-				if (!objective) {
+				if (!objective || objective.userId !== locals.user!.id) {
 					results[krId] = { score: null, error: 'Unauthorized' };
 					return;
 				}
@@ -78,9 +70,11 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 				const scoreLabel = queryResult.progressLabel || null;
 
 				// Update the KR score in database
-				await db.update(keyResults)
-					.set({ score: clampedScore, scoreLabel, updatedAt: new Date() })
-					.where(eq(keyResults.id, krId));
+				await db.keyResults.update(krId, {
+					score: clampedScore,
+					scoreLabel,
+					updatedAt: new Date()
+				});
 
 				results[krId] = { score: clampedScore, scoreLabel: scoreLabel || undefined };
 			})

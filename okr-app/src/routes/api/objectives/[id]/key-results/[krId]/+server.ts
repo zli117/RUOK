@@ -1,9 +1,8 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { objectives, keyResults } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { broadcastDataChange } from '$lib/server/events';
+import type { KeyResultPatch } from '$lib/db/models';
 
 // PUT /api/objectives/[id]/key-results/[krId] - Update a key result
 export const PUT: RequestHandler = async ({ locals, params, request }) => {
@@ -11,21 +10,19 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	// Verify objective belongs to user
-	const objective = await db.query.objectives.findFirst({
-		where: and(eq(objectives.id, params.id), eq(objectives.userId, locals.user.id))
-	});
+	const db = await getDatabase();
 
-	if (!objective) {
+	// Verify objective belongs to user
+	const objective = await db.objectives.findById(params.id);
+
+	if (!objective || objective.userId !== locals.user.id) {
 		return json({ error: 'Objective not found' }, { status: 404 });
 	}
 
 	// Verify key result exists and belongs to objective
-	const existing = await db.query.keyResults.findFirst({
-		where: and(eq(keyResults.id, params.krId), eq(keyResults.objectiveId, params.id))
-	});
+	const existing = await db.keyResults.findById(params.krId);
 
-	if (!existing) {
+	if (!existing || existing.objectiveId !== params.id) {
 		return json({ error: 'Key result not found' }, { status: 404 });
 	}
 
@@ -46,7 +43,7 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 			widgetQueryCode
 		} = body;
 
-		const updates: Record<string, unknown> = {
+		const updates: KeyResultPatch = {
 			updatedAt: new Date()
 		};
 
@@ -69,11 +66,9 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 		if (widgetQueryId !== undefined) updates.widgetQueryId = widgetQueryId || null;
 		if (widgetQueryCode !== undefined) updates.widgetQueryCode = widgetQueryCode || null;
 
-		await db.update(keyResults).set(updates).where(eq(keyResults.id, params.krId));
+		await db.keyResults.update(params.krId, updates);
 
-		const updated = await db.query.keyResults.findFirst({
-			where: eq(keyResults.id, params.krId)
-		});
+		const updated = await db.keyResults.findById(params.krId);
 
 		// Broadcast change to other connected clients
 		broadcastDataChange(locals.user.id, 'data:objectives');
@@ -91,25 +86,23 @@ export const DELETE: RequestHandler = async ({ locals, params }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	// Verify objective belongs to user
-	const objective = await db.query.objectives.findFirst({
-		where: and(eq(objectives.id, params.id), eq(objectives.userId, locals.user.id))
-	});
+	const db = await getDatabase();
 
-	if (!objective) {
+	// Verify objective belongs to user
+	const objective = await db.objectives.findById(params.id);
+
+	if (!objective || objective.userId !== locals.user.id) {
 		return json({ error: 'Objective not found' }, { status: 404 });
 	}
 
 	// Verify key result exists
-	const existing = await db.query.keyResults.findFirst({
-		where: and(eq(keyResults.id, params.krId), eq(keyResults.objectiveId, params.id))
-	});
+	const existing = await db.keyResults.findById(params.krId);
 
-	if (!existing) {
+	if (!existing || existing.objectiveId !== params.id) {
 		return json({ error: 'Key result not found' }, { status: 404 });
 	}
 
-	await db.delete(keyResults).where(eq(keyResults.id, params.krId));
+	await db.keyResults.remove(params.krId);
 
 	// Broadcast change to other connected clients
 	broadcastDataChange(locals.user.id, 'data:objectives');

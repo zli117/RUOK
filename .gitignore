@@ -1,3 +1,37 @@
 Obsidian/
 .claude/
 okr-app/data
+
+# Local devplatform/spirit CLI runtime state
+access_token.json
+cache_version.json
+config.json
+lock
+refresh.lock
+plugins/
+
+# Local agent and mission artifacts
+/.kittify/
+/kitty-ops/
+/kitty-specs/
+/okr-app/docs/reviews/
+/AGENTS.md
+/.claudeignore
+/.gitattributes
+/.worktrees/
+/.codex/
+/.agents/
+/.vibe/
+/.pi/
+/.letta/
+/.opencode/
+/.windsurf/
+/.gemini/
+/.cursor/
+/.qwen/
+/.kilocode/
+/.augment/
+/.amazonq/
+/.kiro/
+/.agent/
+/.github/copilot/

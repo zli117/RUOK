@@ -1,6 +1,4 @@
-import { db } from '$lib/db/client';
-import { objectiveReflections, timePeriods } from '$lib/db/schema';
-import { eq, and, isNull } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
 import { broadcastDataChange } from '$lib/server/events';
 import { findOrCreateDailyPeriod, findOrCreateWeeklyPeriod } from './periods';
@@ -29,15 +27,12 @@ export const getObjectiveReflection: ToolDef<GetReflectionArgs> = {
 		`Get reflection: ${a.level} ${a.year}${a.level === 'monthly' ? `-${a.month}` : ''}`,
 	async execute(ctx, args) {
 		if (args.level === 'monthly' && !args.month) throw new Error('month required when level=monthly');
-		const r = await db.query.objectiveReflections.findFirst({
-			where: and(
-				eq(objectiveReflections.userId, ctx.userId),
-				eq(objectiveReflections.level, args.level),
-				eq(objectiveReflections.year, args.year),
-				args.level === 'monthly' && args.month
-					? eq(objectiveReflections.month, args.month)
-					: isNull(objectiveReflections.month)
-			)
+		const services = await getDatabase();
+		const r = await services.objectiveReflections.findByUserLevelYearMonth({
+			userId: ctx.userId,
+			level: args.level,
+			year: args.year,
+			month: args.level === 'monthly' && args.month ? args.month : null
 		});
 		return { reflection: r?.reflection ?? '' };
 	}
@@ -72,24 +67,18 @@ export const setObjectiveReflection: ToolDef<SetReflectionArgs> = {
 	},
 	async execute(ctx, args) {
 		if (args.level === 'monthly' && !args.month) throw new Error('month required when level=monthly');
-		const existing = await db.query.objectiveReflections.findFirst({
-			where: and(
-				eq(objectiveReflections.userId, ctx.userId),
-				eq(objectiveReflections.level, args.level),
-				eq(objectiveReflections.year, args.year),
-				args.level === 'monthly' && args.month
-					? eq(objectiveReflections.month, args.month)
-					: isNull(objectiveReflections.month)
-			)
+		const services = await getDatabase();
+		const existing = await services.objectiveReflections.findByUserLevelYearMonth({
+			userId: ctx.userId,
+			level: args.level,
+			year: args.year,
+			month: args.level === 'monthly' && args.month ? args.month : null
 		});
 		const now = new Date();
 		if (existing) {
-			await db
-				.update(objectiveReflections)
-				.set({ reflection: args.reflection, updatedAt: now })
-				.where(eq(objectiveReflections.id, existing.id));
+			await services.objectiveReflections.update(existing.id, { reflection: args.reflection, updatedAt: now });
 		} else {
-			await db.insert(objectiveReflections).values({
+			await services.objectiveReflections.create({
 				id: uuidv4(),
 				userId: ctx.userId,
 				level: args.level,
@@ -130,18 +119,15 @@ export const getPeriodNotes: ToolDef<GetPeriodNotesArgs> = {
 	preview: (a) =>
 		a.scope === 'day' ? `Get notes for ${a.day}` : `Get notes for ${a.year}-W${a.week}`,
 	async execute(ctx, args) {
-		const periodWhere = [eq(timePeriods.userId, ctx.userId)];
+		const services = await getDatabase();
+		let period;
 		if (args.scope === 'day') {
 			if (!args.day) throw new Error('day required for scope=day');
-			periodWhere.push(eq(timePeriods.periodType, 'daily'));
-			periodWhere.push(eq(timePeriods.day, args.day));
+			period = await services.timePeriods.find({ userId: ctx.userId, type: 'daily', day: args.day });
 		} else {
 			if (!args.year || !args.week) throw new Error('year and week required for scope=week');
-			periodWhere.push(eq(timePeriods.periodType, 'weekly'));
-			periodWhere.push(eq(timePeriods.year, args.year));
-			periodWhere.push(eq(timePeriods.week, args.week));
+			period = await services.timePeriods.find({ userId: ctx.userId, type: 'weekly', year: args.year, week: args.week });
 		}
-		const period = await db.query.timePeriods.findFirst({ where: and(...periodWhere) });
 		return { notes: period?.notes ?? '' };
 	}
 };
@@ -184,10 +170,8 @@ export const setPeriodNotes: ToolDef<SetPeriodNotesArgs> = {
 			if (!args.year || !args.week) throw new Error('year and week required for scope=week');
 			periodId = await findOrCreateWeeklyPeriod(ctx.userId, args.year, args.week);
 		}
-		await db
-			.update(timePeriods)
-			.set({ notes: args.notes, updatedAt: new Date() })
-			.where(eq(timePeriods.id, periodId));
+		const services = await getDatabase();
+		await services.timePeriods.update(periodId, { notes: args.notes, updatedAt: new Date() });
 		broadcastDataChange(ctx.userId, 'data:daily', 'data:weekly');
 		return { ok: true };
 	}

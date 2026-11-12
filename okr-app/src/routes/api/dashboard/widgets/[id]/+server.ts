@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { dashboardWidgets } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 
 // PUT /api/dashboard/widgets/[id] - Update a widget
 export const PUT: RequestHandler = async ({ locals, params, request }) => {
@@ -10,12 +8,8 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const widget = await db.query.dashboardWidgets.findFirst({
-		where: and(
-			eq(dashboardWidgets.id, params.id),
-			eq(dashboardWidgets.userId, locals.user.id)
-		)
-	});
+	const services = await getDatabase();
+	const widget = await services.dashboardWidgets.findByIdForUser(params.id, locals.user.id);
 
 	if (!widget) {
 		return json({ error: 'Widget not found' }, { status: 404 });
@@ -25,7 +19,12 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 		const body = await request.json();
 		const { title, code, queryId, sortOrder } = body;
 
-		const updates: Record<string, unknown> = {};
+		const updates: {
+			title?: string;
+			widgetType?: 'builtin' | 'custom' | 'saved';
+			config?: string;
+			sortOrder?: number;
+		} = {};
 
 		if (title !== undefined) {
 			updates.title = title;
@@ -45,13 +44,9 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 			return json({ error: 'No updates provided' }, { status: 400 });
 		}
 
-		await db.update(dashboardWidgets)
-			.set(updates)
-			.where(eq(dashboardWidgets.id, params.id));
+		await services.dashboardWidgets.update(params.id, updates);
 
-		const updatedWidget = await db.query.dashboardWidgets.findFirst({
-			where: eq(dashboardWidgets.id, params.id)
-		});
+		const updatedWidget = await services.dashboardWidgets.findById(params.id);
 
 		return json({
 			widget: {
@@ -74,18 +69,14 @@ export const DELETE: RequestHandler = async ({ locals, params }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const widget = await db.query.dashboardWidgets.findFirst({
-		where: and(
-			eq(dashboardWidgets.id, params.id),
-			eq(dashboardWidgets.userId, locals.user.id)
-		)
-	});
+	const services = await getDatabase();
+	const widget = await services.dashboardWidgets.findByIdForUser(params.id, locals.user.id);
 
 	if (!widget) {
 		return json({ error: 'Widget not found' }, { status: 404 });
 	}
 
-	await db.delete(dashboardWidgets).where(eq(dashboardWidgets.id, params.id));
+	await services.dashboardWidgets.remove(params.id);
 
 	return json({ success: true });
 };

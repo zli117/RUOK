@@ -1,7 +1,7 @@
-# Dependencies
+# Dependencies (reinstalled in the builder stage)
 node_modules
 
-# Build output
+# Build output (rebuilt in the builder stage)
 build
 .svelte-kit
 
@@ -11,6 +11,13 @@ build
 .env
 .env.*
 !.env.example
+
+# Local runtime data must NOT enter the image (SQLite data + user homes)
+/data
+/home
+
+# Local TLS/secrets directory (CA certs live on the host, never in the image)
+secrets
 
 # IDE and editor files
 .vscode
@@ -26,12 +33,13 @@ Thumbs.db
 *.md
 !README.md
 
-# Tests
+# Tests (unit/integration suites do not ship in the runtime image)
 *.test.ts
 *.spec.ts
 __tests__
+tests
 
-# Database files (will be created in volume)
+# Database files (created in the volume at runtime)
 *.db
 *.db-journal
 *.db-wal

@@ -1,0 +1,239 @@
+# ============================================================================
+# RUOK Image build & GHCR publication (WP10 / T038, T039, T040).
+#
+# Two strictly separated concerns:
+#   1. validate-image  — runs manually on the selected PR branch. Builds the production image
+#      from `okr-app` context (Dockerfile) and runs practical smoke checks.
+#      This job has LEAST-READ permissions, NO `packages:write`, NO push
+#      credentials, and NEVER performs a registry push or publication.
+#   2. publish         — runs ONLY on pushes to main. Has explicit
+#      `contents: read` + `packages: write` permissions and pushes an immutable
+#      SHA/digest-referenced image to GHCR. It checks out the trusted triggering
+#      ref directly (plain `push` events) — it never uses
+#      `pull_request_target`, so untrusted PR content is never checked out.
+#
+# REGISTRY OWNERSHIP / VISIBILITY PREREQUISITE (recorded, not automated):
+#   The GHCR package `ghcr.io/<owner>/<repo>` (owner/repo derived from GitHub
+#   context below, never hard-coded) must already exist and be owned by / grant
+#   `packages:write` to the publishing identity (the automatic GITHUB_TOKEN of
+#   the owner on push/release events). On the FIRST authorized publish, confirm
+#   (a) the package is created under the expected owner/org, (b) its
+#   visibility (public/private) matches the intended consumers, and (c) the
+#   target platform is supported (default linux/amd64; add linux/arm64 only if
+#   a multi-arch builder/emulation is configured). Without an owner holding
+#   `packages:write` for this repo the publish job fails with an HTTP 403.
+#   These are execution-time settings; the PR validation path never touches a
+#   registry and never claims publication.
+#
+# ACTION PINNING POLICY
+# ---------------------
+# Third-party actions are pinned to immutable commit SHAs (never mutable major
+# tags). The SHAs below were recorded at authoring time from the upstream
+# releases listed in the comments. BEFORE first production run, verify each SHA
+# resolves to the intended tag and update to the current reviewed SHA if any
+# recorded value is not present. Apply-time prerequisite, not a runtime step.
+# ============================================================================
+
+name: RUOK Image Build & Publish
+
+on:
+  push:
+    branches:
+      - main
+  # Select the PR's source branch in Actions > Run workflow.
+  workflow_dispatch:
+
+concurrency:
+  group: ruok-image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false # never cancel an image publish
+
+# Default for the whole workflow is least-read. The publish job overrides with
+# `packages: write` (and is the ONLY job that may push to a registry).
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'      # matches the node:22-alpine production image
+  REGISTRY: ghcr.io
+
+defaults:
+  run:
+    working-directory: okr-app
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # validate-image — manual branch build + smoke checks. NO push capability.
+  # ---------------------------------------------------------------------------
+  validate-image:
+    name: Validate image (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # least-read; intentionally NO packages:write
+    steps:
+      - name: Checkout selected branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Node (pinned + npm cache)
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: okr-app/package-lock.json
+
+      - name: Reproducible install from lockfile
+        run: |
+          node --version
+          npm --version
+          npm ci || {
+            cat "$(npm config get cache)"/_logs/*-debug-0.log
+            exit 1
+          }
+
+      - name: Production build (SvelteKit / adapter-node)
+        run: npm run build
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@6524bf65af31da8d45b59e8c27de4bd072b392f5 # v3.8.0
+
+      - name: Build image from okr-app context (push=false, load=true)
+        # push: false guarantees the PR job can never publish; load: true makes
+        # the image available in the local daemon for the smoke check below.
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
+        with:
+          context: ./okr-app
+          file: okr-app/Dockerfile
+          push: false
+          load: true
+          tags: ruok:pr-${{ github.sha }}
+          provenance: false # keep the local smoke load simple and fast
+
+      - name: Smoke check — container starts and becomes ready (SQLite mode)
+        # DB-first startup: readiness (/api/ready) returns 200 only once the
+        # backend is open AND migrated; liveness (/api/health) is login-free.
+        # Mirrors okr-app/tests/container/smoke-sqlite.sh probe semantics.
+        env:
+          IMG: ruok:pr-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          name="ruok-ci-pr-smoke"
+          docker rm -f "$name" >/dev/null 2>&1 || true
+          docker run -d --name "$name" \
+            -e DATABASE_TYPE=sqlite \
+            -e DATABASE_PATH=/app/data/okr.db \
+            -e NODE_ENV=production \
+            -p 3180:3000 \
+            "$IMG"
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          deadline=$(( $(date +%s) + 120 ))
+          code=""
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3180/api/ready || true)
+            [ "$code" = "200" ] && break
+            sleep 2
+          done
+          echo "ready_code=$code"
+          [ "$code" = "200" ] || { echo "FAIL: /api/ready never 200" >&2; docker logs "$name" >&2 || true; exit 1; }
+          health=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3180/api/health || true)
+          echo "health_code=$health"
+          [ "$health" = "200" ] || { echo "FAIL: /api/health not 200" >&2; exit 1; }
+          echo "Image smoke check PASSED (ready=200, health=200)"
+
+  # ---------------------------------------------------------------------------
+  # publish — main branch publication. Push capability isolated here.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish GHCR image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read  # checkout
+      packages: write # GHCR push — granted ONLY to this job
+    outputs:
+      image: ${{ steps.push.outputs.imageid }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Checkout trusted triggering ref
+        # Main pushes are trusted; we checkout the exact commit that
+        # triggered the run (github.sha). NOT pull_request_target, so no
+        # untrusted PR content is ever checked out or built.
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Same-revision guard — record the exact commit being published
+        run: |
+          echo "Publishing image for commit: ${{ github.sha }}"
+          echo "Event: ${{ github.event_name }}  Ref: ${{ github.ref }}"
+          # The build below uses this exact checked-out working tree, so the
+          # published digest always corresponds to the tested commit.
+
+      - name: Normalize image name and ref tag
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          echo "IMAGE_NAME=${REPOSITORY,,}" >> "$GITHUB_ENV"
+          tag=$(printf '%s' "$REF_NAME" | sed 's/[^a-zA-Z0-9_.-]/-/g; s/^[.-]/_/')
+          echo "IMAGE_REF_TAG=${tag:0:128}" >> "$GITHUB_ENV"
+
+      - name: Set up Node (pinned + npm cache)
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: okr-app/package-lock.json
+
+      - name: Reproducible install from lockfile
+        run: |
+          node --version
+          npm --version
+          npm ci || {
+            cat "$(npm config get cache)"/_logs/*-debug-0.log
+            exit 1
+          }
+
+      - name: Production build (SvelteKit / adapter-node)
+        run: npm run build
+
+      - name: Set up QEMU
+        # Needed only if a multi-platform build is configured. Kept to a single
+        # platform by default; see the registry prerequisite comment.
+        uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@6524bf65af31da8d45b59e8c27de4bd072b392f5 # v3.8.0
+
+      - name: Log in to GHCR
+        # Uses the automatic GITHUB_TOKEN — no embedded/committed secret.
+        # packages:write (job-scoped) is what authorises the push to GHCR.
+        uses: docker/login-action@0d4c9c5ea7693da7b068278f7b52bda2a190a446 # v3.2.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build, tag and push image to GHCR
+        id: push
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
+        with:
+          context: ./okr-app
+          file: okr-app/Dockerfile
+          push: true
+          platforms: linux/amd64 # default; add linux/arm64 only when a multi-arch builder is configured
+          tags: |
+            ghcr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ghcr.io/${{ env.IMAGE_NAME }}:${{ env.IMAGE_REF_TAG }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp || '' }}
+
+      - name: Record immutable pullable digest
+        # A digest (sha256:...) is the immutable pull reference. Recorded to the
+        # step summary so operators can pull the exact published artifact.
+        run: |
+          echo "### Published image" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Image: \`ghcr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Digest: \`${{ steps.push.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Pull by digest:" >> "$GITHUB_STEP_SUMMARY"
+          echo "    docker pull ghcr.io/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "digest=${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"

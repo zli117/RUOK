@@ -1,8 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { timePeriods } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { broadcastDataChange } from '$lib/server/events';
 
 // PUT /api/periods/[id]/journal - Save journal entry for a period
@@ -18,22 +16,15 @@ export const PUT: RequestHandler = async ({ locals, params, request }) => {
 			return json({ error: 'Notes must be a string' }, { status: 400 });
 		}
 
-		// Verify the period belongs to the user
-		const period = await db.query.timePeriods.findFirst({
-			where: and(
-				eq(timePeriods.id, params.id),
-				eq(timePeriods.userId, locals.user.id)
-			)
-		});
+		const services = await getDatabase();
 
-		if (!period) {
+		// Verify the period belongs to the user
+		const period = await services.timePeriods.findById(params.id);
+		if (!period || period.userId !== locals.user.id) {
 			return json({ error: 'Period not found' }, { status: 404 });
 		}
 
-		await db
-			.update(timePeriods)
-			.set({ notes, updatedAt: new Date() })
-			.where(eq(timePeriods.id, params.id));
+		await services.timePeriods.update(params.id, { notes, updatedAt: new Date() });
 
 		broadcastDataChange(locals.user.id, 'data:daily');
 

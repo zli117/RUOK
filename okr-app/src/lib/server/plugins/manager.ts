@@ -3,9 +3,7 @@
  */
 
 import type { DataImportPlugin, PluginConfig, OAuthCredentials, SyncResult, ImportedDataRecord } from './types';
-import { db } from '$lib/db/client';
-import { plugins, dailyMetrics, timePeriods, dailyMetricValues } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { v4 as uuidv4 } from 'uuid';
 
 // Plugin registry
@@ -37,12 +35,8 @@ export function getPlugin(pluginId: string): DataImportPlugin | undefined {
  * Get user's plugin configuration
  */
 export async function getUserPluginConfig(userId: string, pluginId: string): Promise<PluginConfig | null> {
-	const record = await db.query.plugins.findFirst({
-		where: and(
-			eq(plugins.userId, userId),
-			eq(plugins.pluginId, pluginId)
-		)
-	});
+	const services = await getDatabase();
+	const record = await services.plugins.findByUserAndPlugin(userId, pluginId);
 
 	if (!record) return null;
 
@@ -67,21 +61,15 @@ export async function saveUserPluginConfig(
 	credentials: OAuthCredentials,
 	settings?: Record<string, unknown>
 ): Promise<void> {
-	const existing = await db.query.plugins.findFirst({
-		where: and(
-			eq(plugins.userId, userId),
-			eq(plugins.pluginId, pluginId)
-		)
-	});
+	const services = await getDatabase();
+	const existing = await services.plugins.findByUserAndPlugin(userId, pluginId);
 
 	const config = JSON.stringify({ credentials, settings });
 
 	if (existing) {
-		await db.update(plugins)
-			.set({ config, enabled: true })
-			.where(eq(plugins.id, existing.id));
+		await services.plugins.update(existing.id, { config, enabled: true });
 	} else {
-		await db.insert(plugins).values({
+		await services.plugins.create({
 			id: uuidv4(),
 			userId,
 			pluginId,
@@ -96,12 +84,8 @@ export async function saveUserPluginConfig(
  * Disable a plugin for a user
  */
 export async function disableUserPlugin(userId: string, pluginId: string): Promise<void> {
-	await db.update(plugins)
-		.set({ enabled: false, config: null })
-		.where(and(
-			eq(plugins.userId, userId),
-			eq(plugins.pluginId, pluginId)
-		));
+	const services = await getDatabase();
+	await services.plugins.updateByUserAndPlugin(userId, pluginId, { enabled: false, config: null });
 }
 
 /**
@@ -169,12 +153,8 @@ export async function syncPluginData(
 	}
 
 	// Update last sync time
-	await db.update(plugins)
-		.set({ lastSync: new Date() })
-		.where(and(
-			eq(plugins.userId, userId),
-			eq(plugins.pluginId, pluginId)
-		));
+	const services = await getDatabase();
+	await services.plugins.updateByUserAndPlugin(userId, pluginId, { lastSync: new Date() });
 
 	return {
 		success: errors.length === 0,
@@ -190,21 +170,17 @@ export async function syncPluginData(
  * so the flexible template system can read synced data.
  */
 async function importDailyMetrics(userId: string, pluginId: string, record: ImportedDataRecord): Promise<void> {
+	const services = await getDatabase();
+
 	// Find or create the time period for this date
-	let period = await db.query.timePeriods.findFirst({
-		where: and(
-			eq(timePeriods.userId, userId),
-			eq(timePeriods.periodType, 'daily'),
-			eq(timePeriods.day, record.date)
-		)
-	});
+	let period = await services.timePeriods.find({ userId, type: 'daily', day: record.date });
 
 	if (!period) {
 		const date = new Date(record.date);
 		const periodId = uuidv4();
 		const now = new Date();
 
-		await db.insert(timePeriods).values({
+		period = await services.timePeriods.create({
 			id: periodId,
 			userId,
 			periodType: 'daily',
@@ -214,10 +190,6 @@ async function importDailyMetrics(userId: string, pluginId: string, record: Impo
 			createdAt: now,
 			updatedAt: now
 		});
-
-		period = await db.query.timePeriods.findFirst({
-			where: eq(timePeriods.id, periodId)
-		});
 	}
 
 	if (!period) {
@@ -225,43 +197,43 @@ async function importDailyMetrics(userId: string, pluginId: string, record: Impo
 	}
 
 	// Check if metrics already exist
-	const existing = await db.query.dailyMetrics.findFirst({
-		where: and(
-			eq(dailyMetrics.timePeriodId, period.id),
-			eq(dailyMetrics.userId, userId)
-		)
-	});
+	const existing = await services.dailyMetrics.findByPeriod(userId, period.id);
 
 	// Map plugin fields to database columns
-	const metricsData: Record<string, unknown> = {};
+	const metricsData: {
+		sleepLength?: string;
+		wakeUpTime?: string;
+		previousNightBedTime?: string;
+		steps?: number;
+		cardioLoad?: number;
+		restingHeartRate?: number;
+	} = {};
 
 	if (record.fields.sleepLength !== undefined) {
-		metricsData.sleepLength = record.fields.sleepLength;
+		metricsData.sleepLength = String(record.fields.sleepLength);
 	}
 	if (record.fields.wakeUpTime !== undefined) {
-		metricsData.wakeUpTime = record.fields.wakeUpTime;
+		metricsData.wakeUpTime = String(record.fields.wakeUpTime);
 	}
 	if (record.fields.bedTime !== undefined) {
-		metricsData.previousNightBedTime = record.fields.bedTime;
+		metricsData.previousNightBedTime = String(record.fields.bedTime);
 	}
 	if (record.fields.steps !== undefined) {
-		metricsData.steps = record.fields.steps;
+		metricsData.steps = Number(record.fields.steps);
 	}
 	if (record.fields.cardioLoad !== undefined) {
-		metricsData.cardioLoad = record.fields.cardioLoad;
+		metricsData.cardioLoad = Number(record.fields.cardioLoad);
 	}
 	if (record.fields.restingHeartRate !== undefined) {
-		metricsData.restingHeartRate = record.fields.restingHeartRate;
+		metricsData.restingHeartRate = Number(record.fields.restingHeartRate);
 	}
 
 	if (existing) {
 		// Update existing metrics
-		await db.update(dailyMetrics)
-			.set(metricsData)
-			.where(eq(dailyMetrics.id, existing.id));
+		await services.dailyMetrics.update(existing.id, metricsData);
 	} else {
 		// Create new metrics
-		await db.insert(dailyMetrics).values({
+		await services.dailyMetrics.create({
 			id: uuidv4(),
 			userId,
 			timePeriodId: period.id,
@@ -278,28 +250,13 @@ async function importDailyMetrics(userId: string, pluginId: string, record: Impo
 		const metricName = `${pluginId}.${fieldId}`;
 		const stringValue = value === null ? null : String(value);
 
-		const existingValue = await db.query.dailyMetricValues.findFirst({
-			where: and(
-				eq(dailyMetricValues.userId, userId),
-				eq(dailyMetricValues.date, record.date),
-				eq(dailyMetricValues.metricName, metricName)
-			)
+		await services.dailyMetricValues.upsert({
+			id: uuidv4(),
+			userId,
+			date: record.date,
+			metricName,
+			value: stringValue,
+			source: pluginId
 		});
-
-		if (existingValue) {
-			await db.update(dailyMetricValues)
-				.set({ value: stringValue })
-				.where(eq(dailyMetricValues.id, existingValue.id));
-		} else {
-			await db.insert(dailyMetricValues).values({
-				id: uuidv4(),
-				userId,
-				date: record.date,
-				metricName,
-				value: stringValue,
-				source: pluginId
-			});
-		}
 	}
 }
-

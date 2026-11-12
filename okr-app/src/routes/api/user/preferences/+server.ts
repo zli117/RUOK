@@ -1,8 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db/client';
-import { users } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
+import type { UserPatch } from '$lib/db/models';
 
 // GET /api/user/preferences - Get user preferences
 export const GET: RequestHandler = async ({ locals }) => {
@@ -10,9 +9,8 @@ export const GET: RequestHandler = async ({ locals }) => {
 		return json({ error: 'Unauthorized' }, { status: 401 });
 	}
 
-	const user = await db.query.users.findFirst({
-		where: eq(users.id, locals.user.id)
-	});
+	const db = await getDatabase();
+	const user = await db.users.findById(locals.user.id);
 
 	if (!user) {
 		return json({ error: 'User not found' }, { status: 404 });
@@ -55,7 +53,7 @@ export const PUT: RequestHandler = async ({ locals, request }) => {
 			return json({ error: 'Invalid bgColor value' }, { status: 400 });
 		}
 
-		const updates: Record<string, unknown> = {};
+		const updates: UserPatch = {};
 		if (weekStartDay) {
 			updates.weekStartDay = weekStartDay;
 		}
@@ -70,9 +68,8 @@ export const PUT: RequestHandler = async ({ locals, request }) => {
 			return json({ error: 'No valid preferences to update' }, { status: 400 });
 		}
 
-		await db.update(users)
-			.set(updates)
-			.where(eq(users.id, locals.user.id));
+		const db = await getDatabase();
+		await db.users.update(locals.user.id, updates);
 
 		return json({ success: true, weekStartDay, timezone });
 	} catch (error) {

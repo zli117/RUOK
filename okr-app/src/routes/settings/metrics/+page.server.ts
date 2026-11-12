@@ -1,7 +1,5 @@
 import type { PageServerLoad } from './$types';
-import { db } from '$lib/db/client';
-import { metricsTemplates } from '$lib/db/schema';
-import { eq, desc } from 'drizzle-orm';
+import { getDatabase } from '$lib/server/database';
 import { redirect } from '@sveltejs/kit';
 import { getRegisteredPlugins } from '$lib/server/plugins/manager';
 
@@ -12,11 +10,9 @@ export const load: PageServerLoad = async ({ locals, depends }) => {
 		throw redirect(302, '/login');
 	}
 
-	// Get all templates for this user
-	const templates = await db.query.metricsTemplates.findMany({
-		where: eq(metricsTemplates.userId, locals.user.id),
-		orderBy: [desc(metricsTemplates.effectiveFrom)]
-	});
+	// Get all templates for this user (ordered by effectiveFrom descending)
+	const services = await getDatabase();
+	const templates = await services.metricsTemplates.listByUser(locals.user.id);
 
 	// Get available external sources from plugins
 	const plugins = getRegisteredPlugins();
